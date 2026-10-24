@@ -1,8 +1,8 @@
-name: Build A340 Technical Assistant V3 APK
+name: Build A340 Technical Assistant V4 APK
 
 on:
   push:
-    branches: [ a340-v3-master-v5 ]
+    branches: [ a340-v4-postflight-parser ]
   workflow_dispatch:
 
 jobs:
@@ -36,10 +36,10 @@ jobs:
           ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
         run: gradle :app:assembleDebug --stacktrace
       - name: Rename APK
-        run: cp a340-app/app/build/outputs/apk/debug/app-debug.apk A340TechnicalAssistant-V3.apk
+        run: cp a340-app/app/build/outputs/apk/debug/app-debug.apk A340TechnicalAssistant-V4.apk
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: A340TechnicalAssistant-V3
-          path: A340TechnicalAssistant-V3.apk
+          name: A340TechnicalAssistant-V4
+          path: A340TechnicalAssistant-V4.apk
           if-no-files-found: error
