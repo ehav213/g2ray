@@ -24,6 +24,7 @@ class MainActivity : AppCompatActivity() {
     private val pdfIndex by lazy { PdfIndex(this) }
     private var repo: SearchRepository? = null
     private var hits: List<SearchHit> = emptyList()
+    private var postFlightFaults: List<PostFlightAnalyzer.Fault> = emptyList()
     private var photoUri: Uri? = null
     private var photoMode: PhotoMode = PhotoMode.POST_FLIGHT
 
@@ -59,6 +60,9 @@ class MainActivity : AppCompatActivity() {
         b.btnCamera.setOnClickListener { capture(PhotoMode.POST_FLIGHT) }
         b.btnComponentPhoto.setOnClickListener { capture(PhotoMode.COMPONENT) }
         b.btnSearch.setOnClickListener { performSearch() }
+        b.listFaults.setOnItemClickListener { _, _, position, _ ->
+            if (position in postFlightFaults.indices) performPostFlightSearch(postFlightFaults[position])
+        }
         b.listResults.setOnItemClickListener { _, _, position, _ -> openHit(hits[position]) }
     }
 
@@ -90,7 +94,7 @@ class MainActivity : AppCompatActivity() {
     private fun refreshStatus() {
         val r = repo ?: return
         val manuals = r.manuals()
-        b.txtStatus.text = "A340 Master v${r.architectureVersion()} • App V3 • ${manuals.count { it.status == "INTEGRATED" }} manuals"
+        b.txtStatus.text = "A340 Master v${r.architectureVersion()} • App V4 • ${manuals.count { it.status == "INTEGRATED" }} manuals"
         b.txtManuals.text = manuals.joinToString("\n") {
             val note = if (it.code == "ESPM") " • INFORMATION ONLY" else ""
             "${it.code}: ${it.status} • ${it.pages} pages • ${it.images} images$note"
@@ -111,6 +115,29 @@ class MainActivity : AppCompatActivity() {
                 }
             } catch (t: Throwable) {
                 runOnUiThread { toast("Search failed: ${t.message}") }
+            }
+        }
+    }
+
+    private fun performPostFlightSearch(fault: PostFlightAnalyzer.Fault) {
+        val r = repo ?: return toast("Import database first")
+        b.editQuery.setText(fault.text)
+        val ataLabel = fault.ata?.let { " • ATA $it" } ?: ""
+        b.txtStatus.text = "Searching FAULT ${fault.number}$ataLabel • TSM first…"
+
+        io.execute {
+            try {
+                hits = r.searchPostFlightFault(fault.text, fault.ata, fault.identifiers)
+                runOnUiThread {
+                    b.listResults.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, hits)
+                    b.txtStatus.text = if (hits.isEmpty()) {
+                        "No match for FAULT ${fault.number}. Edit OCR text and SEARCH manually."
+                    } else {
+                        "FAULT ${fault.number}$ataLabel • ${hits.size} related results • TSM ranked first"
+                    }
+                }
+            } catch (t: Throwable) {
+                runOnUiThread { b.txtStatus.text = "Post-flight search failed: ${t.message}" }
             }
         }
     }
@@ -188,19 +215,28 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun runOcr(uri: Uri, mode: PhotoMode) {
-        b.txtStatus.text = if (mode == PhotoMode.COMPONENT) "Reading component label…" else "OCR post-flight…"
+        b.txtStatus.text = if (mode == PhotoMode.COMPONENT) "Reading component label…" else "Reading post-flight report…"
         val image = InputImage.fromFilePath(this, uri)
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         recognizer.process(image)
             .addOnSuccessListener { text ->
-                val cleaned = text.text.lines().map { it.trim() }.filter { it.isNotBlank() }.joinToString(" ")
+                val cleaned = text.text.lines().map { it.trim() }.filter { it.isNotBlank() }.joinToString("\n")
                 if (mode == PhotoMode.COMPONENT) {
                     val analysis = ComponentAnalyzer.analyze(text.text)
                     if (analysis.identifiers.isEmpty()) b.editQuery.setText(cleaned)
                     performComponentSearch(analysis)
                 } else {
+                    val analysis = PostFlightAnalyzer.analyze(text.text)
+                    postFlightFaults = analysis.faults
                     b.editQuery.setText(cleaned)
-                    b.txtStatus.text = "Post-flight OCR ready — verify text, then SEARCH"
+                    b.listFaults.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, postFlightFaults)
+                    if (postFlightFaults.isEmpty()) {
+                        b.txtPostFlightSummary.text = "No separate fault lines detected. Verify OCR text and use SEARCH TECHNICAL MASTER."
+                        b.txtStatus.text = "Post-flight OCR complete • manual search available"
+                    } else {
+                        b.txtPostFlightSummary.text = "${postFlightFaults.size} fault(s) detected • tap any fault below • TSM is ranked first"
+                        performPostFlightSearch(postFlightFaults.first())
+                    }
                 }
             }
             .addOnFailureListener { b.txtStatus.text = "OCR failed: ${it.message}" }
