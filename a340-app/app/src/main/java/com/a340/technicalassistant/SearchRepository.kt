@@ -49,7 +49,6 @@ class SearchRepository(dbFile: File) : AutoCloseable {
             if (seen.add(key)) all += hit
         }
 
-        // Preserve literal evidence first, then add semantic expansion evidence.
         ftsSearch(analysis.original, 240).forEach(::add)
         if (analysis.searchText != analysis.original) {
             ftsSearch(analysis.searchText, 360).forEach(::add)
@@ -76,6 +75,13 @@ class SearchRepository(dbFile: File) : AutoCloseable {
             "cdl_item" to 4
         )
 
+        fun primaryEntityPenalty(hit: SearchHit): Int = when (analysis.intent) {
+            QueryIntelligence.Intent.TROUBLESHOOTING,
+            QueryIntelligence.Intent.REMOVAL_INSTALLATION,
+            QueryIntelligence.Intent.INSPECTION -> if (hit.entityType == "task") 0 else 1
+            else -> 0
+        }
+
         fun ataPenalty(hit: SearchHit): Int {
             val ata = analysis.ata ?: return 0
             val needle = "$ata-"
@@ -96,7 +102,8 @@ class SearchRepository(dbFile: File) : AutoCloseable {
         }
 
         val ranked = all.sortedWith(
-            compareBy<SearchHit> { manualRank[it.manual] ?: 50 }
+            compareBy<SearchHit> { primaryEntityPenalty(it) }
+                .thenBy { manualRank[it.manual] ?: 50 }
                 .thenBy { ataPenalty(it) }
                 .thenBy { semanticMatchScore(it) }
                 .thenBy { entityRank[it.entityType] ?: 10 }
