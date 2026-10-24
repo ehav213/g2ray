@@ -74,7 +74,7 @@ object QueryIntelligence {
         "هیدرولیک" to listOf("HYD", "HYDRAULIC"),
         "سوخت" to listOf("FUEL"),
         "اکسیژن" to listOf("OXYGEN", "OXY"),
-        "در" to listOf("DOOR")
+        "درب" to listOf("DOOR")
     )
 
     private val wordGroups = listOf(
@@ -96,7 +96,7 @@ object QueryIntelligence {
     private val ataKeywords = linkedMapOf(
         "21" to listOf("PACK", "AIR CONDITION", "CABIN PRESS", "CABIN TEMP", "VENT"),
         "22" to listOf("AUTOPILOT", "AUTO FLIGHT", "FLIGHT DIRECTOR", "A/P"),
-        "23" to listOf("VHF", "HF ", "RADIO", "SATCOM", "COMM"),
+        "23" to listOf("VHF", "HF", "RADIO", "SATCOM", "COMM"),
         "24" to listOf("GEN", "GENERATOR", "BATTERY", "ELEC", "BUS", "TRU"),
         "25" to listOf("SEAT", "GALLEY", "FURNISH", "CABIN EQUIP"),
         "26" to listOf("FIRE", "SMOKE", "SMK DET", "EXTING"),
@@ -134,9 +134,8 @@ object QueryIntelligence {
             if (original.contains(phrase)) terms.addAll(expansion)
         }
 
-        val upperTokens = Regex("[A-Z0-9][A-Z0-9_./-]*").findAll(upper).map { it.value }.toSet()
         for (group in wordGroups) {
-            if (group.any { upperTokens.contains(it) || upper.contains(it) }) terms.addAll(group)
+            if (group.any { containsTerm(upper, it) }) terms.addAll(group)
         }
 
         val ids = ComponentAnalyzer.analyze(original).identifiers
@@ -174,14 +173,14 @@ object QueryIntelligence {
     }
 
     private fun detectIntent(upper: String, original: String): Intent {
-        fun has(vararg words: String) = words.any { upper.contains(it) || original.contains(it) }
+        fun has(vararg words: String) = words.any { containsTerm(upper, it) || original.contains(it) }
         return when {
-            has("WIRE", "WIRING", "CONNECTOR", "CONTACT", "SPLICE", "CRIMP", "HARNESS", "کابل", "سیم") -> Intent.WIRING
+            has("STANDARD PRACTICE", "ESPM", "CRIMP", "SPLICE") -> Intent.STANDARD_PRACTICE
+            has("WIRE", "WIRING", "CONNECTOR", "CONTACT", "HARNESS", "کابل", "سیم") -> Intent.WIRING
             has("PART NUMBER", "P/N", "PART NO", "NOMENCLATURE", "پارت نامبر") -> Intent.PARTS
             has("MEL", "DEFER", "DISPATCH", "INOP FOR DISPATCH", "دیفر") -> Intent.DISPATCH
             has("REMOVE", "REMOVAL", "INSTALL", "INSTALLATION", "تعویض", "باز کردن", "نصب") -> Intent.REMOVAL_INSTALLATION
             has("INSPECT", "INSPECTION", "CHECK FOR", "بازرسی") -> Intent.INSPECTION
-            has("CRIMP", "SPLICE", "STANDARD PRACTICE", "ESPM") -> Intent.STANDARD_PRACTICE
             has("FAULT", "FAIL", "INOP", "WARNING", "CAUTION", "ECAM", "CFDS", "CMC", "VIB", "LEAK", "NOISE", "SMELL", "خراب", "ایراد", "کار نمی", "کار نمیکند", "لرزش", "نشتی") -> Intent.TROUBLESHOOTING
             else -> Intent.GENERAL
         }
@@ -192,8 +191,15 @@ object QueryIntelligence {
         Regex("\\b(\\d{2})[- ]\\d{2}(?:[- ]\\d{2})?\\b").find(upper)?.let { return it.groupValues[1] }
         val combined = upper + " " + expanded.joinToString(" ")
         for ((ata, words) in ataKeywords) {
-            if (words.any { combined.contains(it) }) return ata
+            if (words.any { containsTerm(combined, it) }) return ata
         }
         return null
+    }
+
+    private fun containsTerm(text: String, term: String): Boolean {
+        val t = term.trim()
+        if (t.isBlank()) return false
+        val pattern = "(^|[^A-Z0-9])${Regex.escape(t)}([^A-Z0-9]|$)"
+        return Regex(pattern).containsMatchIn(text.uppercase())
     }
 }
