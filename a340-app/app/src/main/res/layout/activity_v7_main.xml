@@ -1,0 +1,146 @@
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView
+            android:id="@+id/txtStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Import A340 Technical Master v5 database"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btnImportDb"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="IMPORT / UPDATE DATABASE" />
+
+        <Button
+            android:id="@+id/btnPdfFolder"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="SELECT PDF ROOT FOLDER" />
+
+        <Button
+            android:id="@+id/btnModel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="SELECT / IMPORT LOCAL LLM MODEL (.litertlm)" />
+
+        <TextView
+            android:id="@+id/txtModel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="6dp"
+            android:paddingBottom="8dp"
+            android:text="No local LLM model installed. Retrieval works without a model."
+            android:textIsSelectable="true" />
+
+        <Button
+            android:id="@+id/btnPfr"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="PHOTO POST FLIGHT → GROUNDED AI" />
+
+        <Button
+            android:id="@+id/btnCaptain"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="PHOTO CAPTAIN / TECH LOG → GROUNDED AI" />
+
+        <Button
+            android:id="@+id/btnComponent"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="PHOTO COMPONENT → AI ID SEARCH" />
+
+        <TextView
+            android:id="@+id/txtCards"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="8dp"
+            android:paddingBottom="4dp"
+            android:text="PFR / Crew defect cards will appear here after OCR."
+            android:textStyle="bold" />
+
+        <ListView
+            android:id="@+id/listCards"
+            android:layout_width="match_parent"
+            android:layout_height="220dp"
+            android:dividerHeight="1dp" />
+
+        <EditText
+            android:id="@+id/editAircraft"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Aircraft profile: REG / MSN / customer / effectivity"
+            android:singleLine="true" />
+
+        <EditText
+            android:id="@+id/editQuery"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Fault / question / ATA / FIN / P/N — Persian or English"
+            android:minLines="2" />
+
+        <Button
+            android:id="@+id/btnRetrieve"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="1 — GROUNDED RETRIEVAL / EVIDENCE" />
+
+        <Button
+            android:id="@+id/btnAnswer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="2 — ASK LOCAL LLM — GROUNDED ANSWER" />
+
+        <Button
+            android:id="@+id/btnConfirm"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="CONFIRM LAST OPENED RESULT → SAFE LEARNING" />
+
+        <TextView
+            android:id="@+id/txtAnalysis"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp"
+            android:text="Retrieval analysis, revision/effectivity warnings and learning status appear here."
+            android:textIsSelectable="true" />
+
+        <TextView
+            android:id="@+id/txtAnswer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="100dp"
+            android:padding="10dp"
+            android:text="Local LLM answer will appear here. It is generated only from retrieved evidence."
+            android:textIsSelectable="true" />
+
+        <TextView
+            android:id="@+id/txtManuals"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="8dp" />
+
+        <ListView
+            android:id="@+id/listResults"
+            android:layout_width="match_parent"
+            android:layout_height="620dp"
+            android:dividerHeight="1dp" />
+
+        <Button
+            android:id="@+id/btnLegacy"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="OPEN V6 RETRIEVAL SCREEN" />
+    </LinearLayout>
+</ScrollView>
