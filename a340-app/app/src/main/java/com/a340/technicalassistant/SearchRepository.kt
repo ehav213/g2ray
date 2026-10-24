@@ -3,6 +3,14 @@ package com.a340.technicalassistant
 import android.database.sqlite.SQLiteDatabase
 import java.io.File
 
+
+data class AiSearchBundle(
+    val analysis: QueryIntelligence.Analysis,
+    val hits: List<SearchHit>,
+    val graphLinksAdded: Int,
+    val safetySummary: String
+)
+
 class SearchRepository(dbFile: File) : AutoCloseable {
     private val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
 
@@ -29,6 +37,78 @@ class SearchRepository(dbFile: File) : AutoCloseable {
         if (priority.isEmpty()) return raw.take(limit)
         val rank = priority.withIndex().associate { it.value to it.index }
         return raw.sortedWith(compareBy<SearchHit> { rank[it.manual] ?: 99 }.thenBy { it.score }).take(limit)
+    }
+
+    fun searchAi(query: String, aircraftProfile: String = "", limit: Int = 80): AiSearchBundle {
+        val analysis = QueryIntelligence.analyze(query)
+        val all = mutableListOf<SearchHit>()
+        val seen = linkedSetOf<String>()
+
+        fun add(hit: SearchHit) {
+            val key = "${hit.entityType}|${hit.entityId}|${hit.manual}|${hit.reference}"
+            if (seen.add(key)) all += hit
+        }
+
+        // Preserve literal evidence first, then add semantic expansion evidence.
+        ftsSearch(analysis.original, 240).forEach(::add)
+        if (analysis.searchText != analysis.original) {
+            ftsSearch(analysis.searchText, 360).forEach(::add)
+        }
+        if (analysis.identifiers.isNotEmpty()) {
+            searchComponentIdentifiers(analysis.identifiers, analysis.original, 120).forEach(::add)
+        }
+
+        val graphAdded = expandCrossManualGraph(all.take(36), ::add)
+        val manualOrder = aiManualOrder(analysis.intent)
+        val manualRank = manualOrder.withIndex().associate { it.value to it.index }
+        val entityRank = mapOf(
+            "task" to 0,
+            "chunk" to 1,
+            "mel_entry" to 2,
+            "mel_item" to 2,
+            "mel_procedure" to 2,
+            "awm_identifier" to 2,
+            "asm_sheet" to 2,
+            "part_number" to 2,
+            "figure" to 3,
+            "espm_section" to 3,
+            "espm_figure" to 4,
+            "cdl_item" to 4
+        )
+
+        fun ataPenalty(hit: SearchHit): Int {
+            val ata = analysis.ata ?: return 0
+            val needle = "$ata-"
+            return if (
+                hit.reference.startsWith(needle, ignoreCase = true) ||
+                hit.entityId.contains(":$needle", ignoreCase = true) ||
+                hit.title.contains(needle, ignoreCase = true) ||
+                hit.snippet.contains(needle, ignoreCase = true)
+            ) 0 else 2
+        }
+
+        fun semanticMatchScore(hit: SearchHit): Int {
+            val hay = "${hit.reference} ${hit.title} ${hit.snippet}".uppercase()
+            var matches = 0
+            analysis.expandedTerms.forEach { if (hay.contains(it.uppercase())) matches++ }
+            analysis.identifiers.forEach { if (hay.contains(it.uppercase())) matches += 3 }
+            return -matches
+        }
+
+        val ranked = all.sortedWith(
+            compareBy<SearchHit> { manualRank[it.manual] ?: 50 }
+                .thenBy { ataPenalty(it) }
+                .thenBy { semanticMatchScore(it) }
+                .thenBy { entityRank[it.entityType] ?: 10 }
+                .thenBy { it.score }
+        ).take(limit)
+
+        return AiSearchBundle(
+            analysis = analysis,
+            hits = ranked,
+            graphLinksAdded = graphAdded,
+            safetySummary = buildSafetySummary(ranked.take(12), aircraftProfile)
+        )
     }
 
     fun searchPostFlightFault(faultText: String, ata: String?, identifiers: List<String>, limit: Int = 80): List<SearchHit> {
@@ -100,11 +180,98 @@ class SearchRepository(dbFile: File) : AutoCloseable {
         ).take(limit)
     }
 
+    private fun aiManualOrder(intent: QueryIntelligence.Intent): List<String> = when (intent) {
+        QueryIntelligence.Intent.TROUBLESHOOTING -> listOf("TSM", "AMM/TSM", "MIXED (TSM/AMM)", "AMM", "MEL", "ASM", "AWM", "IPC", "CDL", "ESPM")
+        QueryIntelligence.Intent.REMOVAL_INSTALLATION -> listOf("AMM", "TSM", "IPC", "ASM", "AWM", "ESPM", "MEL", "CDL")
+        QueryIntelligence.Intent.WIRING -> listOf("AWM", "ESPM", "ASM", "AMM", "TSM", "IPC", "MEL", "CDL")
+        QueryIntelligence.Intent.PARTS -> listOf("IPC", "AWM", "AMM", "TSM", "ASM", "ESPM", "MEL", "CDL")
+        QueryIntelligence.Intent.DISPATCH -> listOf("MEL", "CDL", "AMM", "TSM", "IPC", "AWM", "ASM", "ESPM")
+        QueryIntelligence.Intent.STANDARD_PRACTICE -> listOf("ESPM", "AWM", "AMM", "ASM", "TSM", "IPC", "MEL", "CDL")
+        QueryIntelligence.Intent.INSPECTION -> listOf("AMM", "TSM", "IPC", "ASM", "AWM", "MEL", "CDL", "ESPM")
+        QueryIntelligence.Intent.GENERAL -> listOf("TSM", "AMM", "ASM", "AWM", "IPC", "MEL", "CDL", "ESPM")
+    }
+
+    private fun expandCrossManualGraph(seedHits: List<SearchHit>, add: (SearchHit) -> Unit): Int {
+        val sections = linkedSetOf<String>()
+        val refRegex = Regex("\\b\\d{2}-\\d{2}-\\d{2}\\b")
+        seedHits.forEach { h ->
+            listOf(h.reference, h.title, h.snippet).forEach { s ->
+                refRegex.findAll(s).forEach { sections += it.value }
+            }
+        }
+        var added = 0
+        for (ref in sections.take(18)) {
+            val links = mutableListOf<Pair<String, String>>()
+            db.rawQuery(
+                "SELECT DISTINCT reference_value,COALESCE(target_manual,'') FROM cross_manual_links WHERE resolution_status='EXACT' AND (reference_value=? OR source_entity_id=?) AND target_manual IS NOT NULL LIMIT 12",
+                arrayOf(ref, "coverage:$ref")
+            ).use { c ->
+                while (c.moveToNext()) links += c.getString(0) to c.getString(1)
+            }
+            for ((value, targetManual) in links) {
+                val candidates = ftsSearch(value, 32).filter { it.manual == targetManual }.take(4)
+                for (candidate in candidates) {
+                    add(candidate.copy(snippet = "AI CROSS-MANUAL EXACT LINK • $ref → $targetManual\n${candidate.snippet}"))
+                    added++
+                }
+            }
+        }
+        return added
+    }
+
+    private data class SourceSafety(
+        val manual: String,
+        val revisionDate: String,
+        val revisionNumber: String,
+        val revisionStatus: String,
+        val applicability: String
+    )
+
+    private fun safetyFor(hit: SearchHit): SourceSafety? {
+        val src = runCatching { resolve(hit) }.getOrNull() ?: return null
+        val sql = """
+            SELECT COALESCE(d.manual,''),COALESCE(d.revision_date,''),COALESCE(d.revision_number,''),
+                   COALESCE(d.revision_status,''),
+                   TRIM(COALESCE(p.selected_applicability,'') || ' ' || COALESCE(p.effectivity_json,''))
+            FROM documents d
+            LEFT JOIN pages p ON p.document_id=d.document_id AND p.pdf_page=?
+            WHERE d.filename=?
+            LIMIT 1
+        """.trimIndent()
+        db.rawQuery(sql, arrayOf(src.pdfPage.toString(), src.filename)).use { c ->
+            if (!c.moveToFirst()) return null
+            return SourceSafety(c.getString(0), c.getString(1), c.getString(2), c.getString(3), c.getString(4))
+        }
+    }
+
+    private fun buildSafetySummary(hits: List<SearchHit>, aircraftProfile: String): String {
+        val sourceInfo = hits.mapNotNull(::safetyFor)
+        val statuses = sourceInfo.map { "${it.manual}:${it.revisionDate.ifBlank { "REV?" }}:${it.revisionStatus.ifBlank { "STATUS?" }}" }.distinct().take(8)
+        val espInfo = sourceInfo.any { it.manual == "ESPM" || it.revisionStatus.contains("INFORMATION_ONLY", ignoreCase = true) }
+        val effectivity = if (aircraftProfile.isBlank()) {
+            "EFFECTIVITY: NOT VERIFIED — enter REG/MSN/effectivity profile before using a task"
+        } else {
+            val tokens = Regex("[A-Z0-9-]{2,}").findAll(aircraftProfile.uppercase()).map { it.value }.toList()
+            val known = sourceInfo.filter { it.applicability.isNotBlank() }
+            val matched = known.count { s ->
+                val app = s.applicability.uppercase()
+                app.contains("ALL") || tokens.any { app.contains(it) }
+            }
+            "EFFECTIVITY PROFILE: $aircraftProfile • matched evidence $matched/${known.size.coerceAtLeast(1)} • verify in source manual"
+        }
+        return buildString {
+            append(effectivity)
+            if (statuses.isNotEmpty()) append("\nREVISION SOURCES: ").append(statuses.joinToString(" | "))
+            if (espInfo) append("\nESPM: INFORMATION ONLY / NOT PRIMARY REFERENCE")
+            append("\nAI SAFETY: evidence retrieval only; source manual remains authoritative")
+        }
+    }
+
     private fun ftsSearch(userQuery: String, limit: Int): List<SearchHit> {
         val terms = Regex("[A-Za-z0-9][A-Za-z0-9_./-]*")
             .findAll(userQuery.uppercase()).map { it.value }.distinct().toList()
         if (terms.isEmpty()) return emptyList()
-        val match = terms.take(24).joinToString(" OR ") { "\"${it.replace("\"", "")}\"*" }
+        val match = terms.take(28).joinToString(" OR ") { "\"${it.replace("\"", "")}\"*" }
         val sql = """
             SELECT entity_type,entity_id,COALESCE(manual,''),COALESCE(reference,''),COALESCE(title,''),
                    snippet(global_search_fts,5,'[',']','…',22), bm25(global_search_fts)
