@@ -52,7 +52,9 @@ class MainActivity : AppCompatActivity() {
         setContentView(b.root)
         openExistingDb()
 
-        b.btnImportDb.setOnClickListener { dbPicker.launch(arrayOf("application/octet-stream", "application/x-sqlite3", "*/*")) }
+        b.btnImportDb.setOnClickListener {
+            dbPicker.launch(arrayOf("application/octet-stream", "application/x-sqlite3", "*/*"))
+        }
         b.btnPdfFolder.setOnClickListener { treePicker.launch(null) }
         b.btnCamera.setOnClickListener { capture(PhotoMode.POST_FLIGHT) }
         b.btnComponentPhoto.setOnClickListener { capture(PhotoMode.COMPONENT) }
@@ -88,21 +90,24 @@ class MainActivity : AppCompatActivity() {
     private fun refreshStatus() {
         val r = repo ?: return
         val manuals = r.manuals()
-        b.txtStatus.text = "A340 Master v${r.architectureVersion()} • ${r.buildTimestamp()} • App V2"
-        b.txtManuals.text = manuals.joinToString("\n") { "${it.code}: ${it.status} • ${it.pages} pages • ${it.images} images" }
+        b.txtStatus.text = "A340 Master v${r.architectureVersion()} • App V3 • ${manuals.count { it.status == "INTEGRATED" }} manuals"
+        b.txtManuals.text = manuals.joinToString("\n") {
+            val note = if (it.code == "ESPM") " • INFORMATION ONLY" else ""
+            "${it.code}: ${it.status} • ${it.pages} pages • ${it.images} images$note"
+        }
     }
 
     private fun performSearch() {
         val r = repo ?: return toast("Import database first")
         val q = b.editQuery.text.toString().trim()
         if (q.isBlank()) return
-        b.txtStatus.text = "Searching technical master…"
+        b.txtStatus.text = "Searching all integrated manuals…"
         io.execute {
             try {
                 hits = r.search(q)
                 runOnUiThread {
                     b.listResults.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, hits)
-                    b.txtStatus.text = "Search complete: ${hits.size} results"
+                    b.txtStatus.text = "Search complete: ${hits.size} results • dynamic manual ranking"
                 }
             } catch (t: Throwable) {
                 runOnUiThread { toast("Search failed: ${t.message}") }
@@ -112,22 +117,33 @@ class MainActivity : AppCompatActivity() {
 
     private fun performComponentSearch(analysis: ComponentAnalyzer.Result) {
         val r = repo ?: return toast("Import database first")
-        if (analysis.identifiers.isEmpty()) {
-            b.txtStatus.text = "No readable FIN / P/N / connector ID found. Retake a closer photo of the label."
+        val raw = analysis.rawText.trim()
+
+        if (analysis.identifiers.isEmpty() && raw.isBlank()) {
+            b.txtStatus.text = "No readable label text found. Retake a closer photo with the nameplate/FIN/P/N visible."
             return
         }
 
-        b.editQuery.setText(analysis.query)
-        b.txtStatus.text = "Detected IDs: ${analysis.identifiers.joinToString(", ")} • searching IPC/AWM/master…"
+        b.editQuery.setText(if (analysis.identifiers.isNotEmpty()) analysis.query else raw)
+        b.txtStatus.text = if (analysis.identifiers.isNotEmpty()) {
+            "Detected IDs: ${analysis.identifiers.joinToString(", ")} • searching ALL manuals…"
+        } else {
+            "No structured ID detected • searching OCR text across ALL manuals…"
+        }
+
         io.execute {
             try {
-                hits = r.searchComponentIdentifiers(analysis.identifiers)
+                hits = if (analysis.identifiers.isNotEmpty()) {
+                    r.searchComponentIdentifiers(analysis.identifiers, raw)
+                } else {
+                    r.search(raw)
+                }
                 runOnUiThread {
                     b.listResults.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, hits)
                     b.txtStatus.text = if (hits.isEmpty()) {
-                        "IDs detected but no database match. Verify OCR text or try SEARCH manually."
+                        "No database match. Retake the label closer or edit OCR text and SEARCH manually."
                     } else {
-                        "Component search complete: ${hits.size} results • exact IPC/AWM matches are shown first"
+                        "Component search complete: ${hits.size} results • all manuals included"
                     }
                 }
             } catch (t: Throwable) {
@@ -142,14 +158,22 @@ class MainActivity : AppCompatActivity() {
             val src = r.resolve(hit)
             val uri = src?.let { pdfIndex.find(it.filename) }
             runOnUiThread {
-                if (src == null) toast("No source page mapping for this result")
-                else if (uri == null) toast("PDF not indexed: ${src.filename}")
-                else startActivity(Intent(this, PdfPageActivity::class.java).apply {
-                    putExtra("uri", uri.toString())
-                    putExtra("page", src.pdfPage)
-                    putExtra("title", "[${src.manual}] ${src.reference} — ${src.title}")
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                })
+                if (src == null) {
+                    toast("No source page mapping for this result")
+                } else if (uri == null) {
+                    toast("PDF not indexed: ${src.filename}")
+                } else {
+                    if (src.manual == "ESPM") {
+                        toast("ESPM is INFORMATION ONLY / NOT PRIMARY REFERENCE")
+                    }
+                    startActivity(Intent(this, PdfPageActivity::class.java).apply {
+                        putExtra("uri", uri.toString())
+                        putExtra("page", src.pdfPage)
+                        val manualLabel = if (src.manual == "ESPM") "ESPM • INFO ONLY" else src.manual
+                        putExtra("title", "[$manualLabel] ${src.reference} — ${src.title}")
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    })
+                }
             }
         }
     }
