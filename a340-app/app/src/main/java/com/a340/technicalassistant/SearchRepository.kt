@@ -35,6 +35,73 @@ class SearchRepository(dbFile: File) : AutoCloseable {
         ).take(limit)
     }
 
+    fun searchPostFlightFault(
+        faultText: String,
+        ata: String?,
+        identifiers: List<String>,
+        limit: Int = 80
+    ): List<SearchHit> {
+        val out = mutableListOf<SearchHit>()
+        val seen = linkedSetOf<String>()
+
+        fun add(hit: SearchHit) {
+            val key = "${hit.entityType}|${hit.entityId}|${hit.manual}|${hit.reference}"
+            if (seen.add(key)) out += hit
+        }
+
+        // Broad fault text search first so TSM chunks/tasks are always available.
+        ftsSearch(faultText, 300).forEach(::add)
+
+        // Exact identifiers add IPC/AWM/ESPM evidence without replacing TSM-first ranking.
+        if (identifiers.isNotEmpty()) {
+            searchComponentIdentifiers(identifiers, faultText, 120).forEach(::add)
+        }
+
+        val manualRank = mapOf(
+            "TSM" to 0,
+            "AMM/TSM" to 0,
+            "MIXED (TSM/AMM)" to 0,
+            "AMM" to 1,
+            "MEL" to 2,
+            "AWM" to 3,
+            "ASM" to 4,
+            "IPC" to 5,
+            "CDL" to 6,
+            "ESPM" to 7
+        )
+        val entityRank = mapOf(
+            "task" to 0,
+            "chunk" to 1,
+            "mel_entry" to 2,
+            "mel_item" to 2,
+            "awm_identifier" to 2,
+            "asm_sheet" to 2,
+            "part_number" to 2,
+            "figure" to 3,
+            "espm_section" to 3,
+            "espm_figure" to 4,
+            "cdl_item" to 4
+        )
+
+        fun ataPenalty(hit: SearchHit): Int {
+            if (ata.isNullOrBlank()) return 0
+            val needle = "$ata-"
+            return if (
+                hit.reference.startsWith(needle, ignoreCase = true) ||
+                hit.entityId.contains(":$needle", ignoreCase = true) ||
+                hit.title.contains(needle, ignoreCase = true) ||
+                hit.snippet.contains(needle, ignoreCase = true)
+            ) 0 else 1
+        }
+
+        return out.sortedWith(
+            compareBy<SearchHit> { manualRank[it.manual] ?: 50 }
+                .thenBy { ataPenalty(it) }
+                .thenBy { entityRank[it.entityType] ?: 10 }
+                .thenBy { it.score }
+        ).take(limit)
+    }
+
     private fun ftsSearch(userQuery: String, limit: Int): List<SearchHit> {
         val terms = Regex("[A-Za-z0-9][A-Za-z0-9_./-]*")
             .findAll(userQuery.uppercase())
@@ -75,7 +142,6 @@ class SearchRepository(dbFile: File) : AutoCloseable {
             if (seen.add(key)) out += hit
         }
 
-        // Exact IPC P/N matches.
         ids.forEach { id ->
             runCatching {
                 db.rawQuery(
@@ -89,7 +155,6 @@ class SearchRepository(dbFile: File) : AutoCloseable {
             }
         }
 
-        // Exact AWM equipment/FIN/connector identifiers.
         ids.forEach { id ->
             runCatching {
                 db.rawQuery(
@@ -103,7 +168,6 @@ class SearchRepository(dbFile: File) : AutoCloseable {
             }
         }
 
-        // Exact ESPM section references (e.g. 20-33-11) are authoritative only as information-only ESPM source data.
         ids.forEach { id ->
             runCatching {
                 db.rawQuery(
@@ -117,7 +181,6 @@ class SearchRepository(dbFile: File) : AutoCloseable {
             }
         }
 
-        // Search the complete V5 master. Ranking changes with context; no manual is excluded.
         val broadQuery = listOf(rawText.trim(), ids.joinToString(" ")).filter { it.isNotBlank() }.joinToString(" ")
         if (broadQuery.isNotBlank()) {
             runCatching { search(broadQuery, limit * 2) }.getOrDefault(emptyList()).forEach(::add)
@@ -192,7 +255,7 @@ class SearchRepository(dbFile: File) : AutoCloseable {
             hasAny("PART NUMBER", "P/N", "PART NO", "PN ", "NOMENCLATURE") ->
                 listOf("IPC", "AWM", "AMM", "TSM", "ASM", "ESPM", "MEL", "CDL")
             hasAny("FAULT", "ECAM", "CFDS", "WARNING", "FAILURE", "MESSAGE") ->
-                listOf("TSM", "AMM", "MEL", "ASM", "AWM", "IPC", "CDL", "ESPM")
+                listOf("TSM", "AMM/TSM", "AMM", "MEL", "ASM", "AWM", "IPC", "CDL", "ESPM")
             hasAny("MEL", "DEFER", "DISPATCH", "INOPERATIVE", "INOP", "REPAIR INTERVAL") ->
                 listOf("MEL", "CDL", "AMM", "TSM", "IPC", "AWM", "ASM", "ESPM")
             hasAny("REMOVE", "REMOVAL", "INSTALL", "INSTALLATION", "TEST", "INSPECTION", "ADJUST", "SERVIC") ->
