@@ -1,0 +1,40 @@
+name: Build A340 Technical Assistant APK
+
+on:
+  push:
+    branches: [ a340-apk-build ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout A340 branch
+        uses: actions/checkout@v4
+        with:
+          ref: a340-apk-build
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android 35 SDK
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Build debug APK
+        working-directory: a340-app
+        run: gradle :app:assembleDebug --stacktrace
+      - name: Rename APK
+        run: cp a340-app/app/build/outputs/apk/debug/app-debug.apk A340TechnicalAssistant-V1.apk
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: A340TechnicalAssistant-V1
+          path: A340TechnicalAssistant-V1.apk
+          if-no-files-found: error
