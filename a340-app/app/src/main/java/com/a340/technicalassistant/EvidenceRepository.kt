@@ -44,19 +44,18 @@ class EvidenceRepository(dbFile: File) : AutoCloseable {
         val meta = db.rawQuery(
             """
             SELECT t.document_id,t.start_pdf_page,COALESCE(t.end_pdf_page,t.start_pdf_page),
-                   COALESCE(t.task_title,''),COALESCE(t.selected_applicability,'')
+                   COALESCE(t.task_title,'')
             FROM task_entries t WHERE t.task_id=? LIMIT 1
             """.trimIndent(),
             arrayOf(taskId)
         ).use { c ->
             if (!c.moveToFirst()) return ""
-            TaskMeta(c.getInt(0), c.getInt(1), c.getInt(2), c.getString(3), c.getString(4))
+            TaskMeta(c.getInt(0), c.getInt(1), c.getInt(2), c.getString(3))
         }
 
         val endPage = minOf(meta.endPage, meta.startPage + 1)
         val text = StringBuilder()
         if (meta.title.isNotBlank()) text.append(meta.title).append(". ")
-        if (meta.applicability.isNotBlank()) text.append("Applicability: ").append(meta.applicability).append(". ")
 
         db.rawQuery(
             """
@@ -76,8 +75,7 @@ class EvidenceRepository(dbFile: File) : AutoCloseable {
         val documentId: Int,
         val startPage: Int,
         val endPage: Int,
-        val title: String,
-        val applicability: String
+        val title: String
     )
 
     override fun close() = db.close()
