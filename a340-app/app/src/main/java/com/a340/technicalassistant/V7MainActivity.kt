@@ -6,12 +6,15 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.widget.ArrayAdapter
+import android.widget.Button
+import android.widget.EditText
+import android.widget.ListView
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
-import com.a340.technicalassistant.databinding.ActivityV7MainBinding
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -20,7 +23,31 @@ import java.util.concurrent.Executors
 
 class V7MainActivity : AppCompatActivity() {
     private enum class PhotoMode { PFR, CAPTAIN, COMPONENT }
-    private lateinit var b: ActivityV7MainBinding
+
+    private class Views(a: AppCompatActivity) {
+        val txtStatus: TextView = a.findViewById(R.id.txtStatus)
+        val btnImportDb: Button = a.findViewById(R.id.btnImportDb)
+        val btnPdfFolder: Button = a.findViewById(R.id.btnPdfFolder)
+        val btnModel: Button = a.findViewById(R.id.btnModel)
+        val txtModel: TextView = a.findViewById(R.id.txtModel)
+        val btnPfr: Button = a.findViewById(R.id.btnPfr)
+        val btnCaptain: Button = a.findViewById(R.id.btnCaptain)
+        val btnComponent: Button = a.findViewById(R.id.btnComponent)
+        val txtCards: TextView = a.findViewById(R.id.txtCards)
+        val listCards: ListView = a.findViewById(R.id.listCards)
+        val editAircraft: EditText = a.findViewById(R.id.editAircraft)
+        val editQuery: EditText = a.findViewById(R.id.editQuery)
+        val btnRetrieve: Button = a.findViewById(R.id.btnRetrieve)
+        val btnAnswer: Button = a.findViewById(R.id.btnAnswer)
+        val btnConfirm: Button = a.findViewById(R.id.btnConfirm)
+        val txtAnalysis: TextView = a.findViewById(R.id.txtAnalysis)
+        val txtAnswer: TextView = a.findViewById(R.id.txtAnswer)
+        val txtManuals: TextView = a.findViewById(R.id.txtManuals)
+        val listResults: ListView = a.findViewById(R.id.listResults)
+        val btnLegacy: Button = a.findViewById(R.id.btnLegacy)
+    }
+
+    private lateinit var b: Views
     private val io = Executors.newSingleThreadExecutor()
     private val dbm by lazy { DatabaseManager(this) }
     private val pdfs by lazy { PdfIndex(this) }
@@ -57,8 +84,8 @@ class V7MainActivity : AppCompatActivity() {
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
-        b = ActivityV7MainBinding.inflate(layoutInflater)
-        setContentView(b.root)
+        setContentView(R.layout.activity_v7_main)
+        b = Views(this)
         openDb()
         modelStatus()
 
@@ -96,7 +123,7 @@ class V7MainActivity : AppCompatActivity() {
             runCatching {
                 dbm.importDatabase(uri) { bytes -> ui { status("Copying DB: ${bytes / 1048576} MB") } }
             }.onSuccess { ui { openDb() } }
-             .onFailure { ui { status("Database import failed: ${it.message}") } }
+                .onFailure { ui { status("Database import failed: ${it.message}") } }
         }
     }
 
@@ -243,12 +270,11 @@ class V7MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun augment(text: String, ata: String?, ids: List<String>) =
-        buildString {
-            append(text)
-            ata?.let { append(" ATA ").append(it) }
-            if (ids.isNotEmpty()) append(' ').append(ids.joinToString(" "))
-        }
+    private fun augment(text: String, ata: String?, ids: List<String>) = buildString {
+        append(text)
+        ata?.let { append(" ATA ").append(it) }
+        if (ids.isNotEmpty()) append(' ').append(ids.joinToString(" "))
+    }
 
     private fun open(hit: SearchHit) {
         openedHit = hit
