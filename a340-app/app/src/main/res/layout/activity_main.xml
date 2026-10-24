@@ -27,6 +27,11 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="PHOTO POST FLIGHT → OCR" />
+        <Button
+            android:id="@+id/btnComponentPhoto"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="PHOTO COMPONENT → ID SEARCH" />
         <EditText
             android:id="@+id/editQuery"
             android:layout_width="match_parent"
