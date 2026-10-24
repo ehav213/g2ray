@@ -9,10 +9,13 @@ android {
 
     defaultConfig {
         applicationId = "com.a340.technicalassistant"
-        minSdk = 23
+        minSdk = 24
         targetSdk = 35
-        versionCode = 7
-        versionName = "0.6.0"
+        versionCode = 8
+        versionName = "0.7.0"
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     buildFeatures { viewBinding = true }
@@ -30,4 +33,5 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.18.0")
 }
