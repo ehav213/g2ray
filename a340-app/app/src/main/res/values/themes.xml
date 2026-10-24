@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.A340TechnicalAssistant" parent="Theme.MaterialComponents.DayNight.DarkActionBar">
+        <item name="colorPrimary">#1F4B99</item>
+        <item name="colorPrimaryVariant">#173B79</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+    </style>
+</resources>

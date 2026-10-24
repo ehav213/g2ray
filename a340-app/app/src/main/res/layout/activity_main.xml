@@ -1,0 +1,52 @@
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+        <TextView
+            android:id="@+id/txtStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Database not loaded"
+            android:textStyle="bold" />
+        <Button
+            android:id="@+id/btnImportDb"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="IMPORT / UPDATE DATABASE" />
+        <Button
+            android:id="@+id/btnPdfFolder"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="SELECT PDF ROOT FOLDER" />
+        <Button
+            android:id="@+id/btnCamera"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="PHOTO POST FLIGHT → OCR" />
+        <EditText
+            android:id="@+id/editQuery"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Fault, ATA, FIN, task, part number…"
+            android:minLines="2" />
+        <Button
+            android:id="@+id/btnSearch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="SEARCH TECHNICAL MASTER" />
+        <TextView
+            android:id="@+id/txtManuals"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="8dp" />
+        <ListView
+            android:id="@+id/listResults"
+            android:layout_width="match_parent"
+            android:layout_height="600dp"
+            android:dividerHeight="1dp" />
+    </LinearLayout>
+</ScrollView>
