@@ -36,6 +36,54 @@ class SearchRepository(dbFile: File) : AutoCloseable {
         return out
     }
 
+    fun searchComponentIdentifiers(identifiers: List<String>, limit: Int = 60): List<SearchHit> {
+        val ids = identifiers.map { it.uppercase() }.distinct().take(12)
+        if (ids.isEmpty()) return emptyList()
+
+        val out = mutableListOf<SearchHit>()
+        val seen = linkedSetOf<String>()
+
+        fun add(hit: SearchHit) {
+            val key = "${hit.entityType}|${hit.entityId}|${hit.manual}|${hit.reference}"
+            if (seen.add(key)) out += hit
+        }
+
+        // Highest priority: exact IPC part-number matches.
+        ids.forEach { id ->
+            try {
+                db.rawQuery(
+                    "SELECT part_number,COALESCE(nomenclature,''),COALESCE(raw_block,'') FROM ipc_items WHERE UPPER(part_number)=? LIMIT 8",
+                    arrayOf(id)
+                ).use { c ->
+                    while (c.moveToNext()) {
+                        add(SearchHit("part_number", c.getString(0), "IPC", c.getString(0), c.getString(1), c.getString(2), -1000.0))
+                    }
+                }
+            } catch (_: Throwable) { }
+        }
+
+        // Next: exact AWM identifiers such as FIN/connector/equipment labels.
+        ids.forEach { id ->
+            try {
+                db.rawQuery(
+                    "SELECT CAST(id AS TEXT),token,COALESCE(kind,'') FROM awm_identifiers WHERE UPPER(token)=? LIMIT 12",
+                    arrayOf(id)
+                ).use { c ->
+                    while (c.moveToNext()) {
+                        add(SearchHit("awm_identifier", c.getString(0), "AWM", c.getString(1), c.getString(2), "Exact AWM identifier match", -900.0))
+                    }
+                }
+            } catch (_: Throwable) { }
+        }
+
+        // Then broaden through the master FTS to AMM/TSM/ASM/AWM/IPC and future manuals.
+        try {
+            search(ids.joinToString(" "), limit).forEach(::add)
+        } catch (_: Throwable) { }
+
+        return out.take(limit)
+    }
+
     fun resolve(hit: SearchHit): ResolvedSource? = when (hit.entityType) {
         "chunk" -> one("SELECT c.manual,c.document_filename,c.pdf_page,COALESCE(c.ata_chapter,''),COALESCE(c.ata_title,''),c.content FROM chunks c WHERE c.chunk_id=?", hit.entityId)
         "task" -> one("SELECT COALESCE(d.manual,''),d.filename,t.start_pdf_page,t.task_ref,COALESCE(t.task_title,''),'' FROM task_entries t JOIN documents d ON d.document_id=t.document_id WHERE t.task_id=?", hit.entityId)
