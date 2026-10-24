@@ -88,8 +88,7 @@ class SearchRepository(dbFile: File) : AutoCloseable {
             return if (
                 hit.reference.startsWith(needle, ignoreCase = true) ||
                 hit.entityId.contains(":$needle", ignoreCase = true) ||
-                hit.title.contains(needle, ignoreCase = true) ||
-                hit.snippet.contains(needle, ignoreCase = true)
+                hit.title.startsWith(needle, ignoreCase = true)
             ) 0 else 2
         }
 
@@ -175,8 +174,7 @@ class SearchRepository(dbFile: File) : AutoCloseable {
             return if (
                 hit.reference.startsWith(needle, ignoreCase = true) ||
                 hit.entityId.contains(":$needle", ignoreCase = true) ||
-                hit.title.contains(needle, ignoreCase = true) ||
-                hit.snippet.contains(needle, ignoreCase = true)
+                hit.title.startsWith(needle, ignoreCase = true)
             ) 0 else 1
         }
         return input.sortedWith(
