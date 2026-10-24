@@ -25,8 +25,7 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
         val cache = File(context.cacheDir, "litertlm_cache").apply { mkdirs() }
         val config = EngineConfig(
             modelPath = modelFile.absolutePath,
-            backend = Backend.CPU(threadCount = 2),
-            maxNumTokens = 1536,
+            backend = Backend.CPU(),
             cacheDir = cache.absolutePath
         )
         val candidate = Engine(config)
@@ -35,7 +34,6 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
             engine = candidate
             loadedPath = modelFile.absolutePath
         } catch (t: Throwable) {
-            runCatching { candidate.close() }
             throw IllegalStateException("Local LLM could not initialize: ${t.message}", t)
         }
     }
@@ -71,16 +69,13 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
             EVIDENCE:
             $evidencePack
 
-            Produce a grounded answer now.
+            Produce a concise grounded answer now.
         """.trimIndent()
 
         active.createConversation(
-            ConversationConfig(
-                systemInstruction = systemInstruction,
-                maxOutputToken = 320
-            )
+            ConversationConfig(systemInstruction = systemInstruction)
         ).use { conversation ->
-            return conversation.sendMessage(prompt, maxOutputToken = 320).toString().trim()
+            return conversation.sendMessage(prompt).toString().trim()
         }
     }
 
