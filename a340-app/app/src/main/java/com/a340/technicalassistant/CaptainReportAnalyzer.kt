@@ -17,12 +17,19 @@ object CaptainReportAnalyzer {
 
     data class Result(val rawText: String, val defects: List<Defect>)
 
-    private val noise = listOf(
+    private val exactNoise = setOf(
         "TECH LOG", "TECHNICAL LOG", "AIRCRAFT TECHNICAL LOG", "DEFECT LOG",
         "CAPTAIN REPORT", "CREW REPORT", "PILOT REPORT", "DATE", "FLIGHT",
         "FLIGHT NO", "FLT NO", "A/C REG", "AIRCRAFT REG", "STATION", "SECTOR",
         "FROM", "TO", "SIGNATURE", "CAPTAIN", "COMMANDER", "RECTIFICATION",
         "ACTION TAKEN", "ENGINEER", "LICENCE", "LICENSE", "TIME", "PAGE"
+    )
+
+    private val prefixNoise = listOf(
+        "DATE ", "FLIGHT NO ", "FLT NO ", "A/C REG ", "AIRCRAFT REG ",
+        "STATION ", "SECTOR ", "FROM ", "TO ", "SIGNATURE ",
+        "RECTIFICATION ", "ACTION TAKEN ", "ENGINEER ", "LICENCE ",
+        "LICENSE ", "TIME ", "PAGE "
     )
 
     private val defectWords = listOf(
@@ -53,13 +60,13 @@ object CaptainReportAnalyzer {
         "27" to listOf("FLAP", "SLAT", "SPOILER", "AILERON", "RUDDER", "ELEVATOR", "TRIM"),
         "28" to listOf("FUEL", "TANK PUMP", "TK PUMP"),
         "29" to listOf("HYD", "HYDRAULIC", "RESERVOIR", "RSVR"),
-        "30" to listOf("ANTI ICE", "ANTI-ICE", "WIPER", "WINDSHIELD HEAT"),
+        "30" to listOf("ANTI ICE", "ANTI-ICE", "ICE DET", "WIPER", "WINDSHIELD HEAT"),
         "31" to listOf("ECAM", "DISPLAY", "FWS", "INDICATION"),
         "32" to listOf("GEAR", "BRAKE", "NWS", "WHEEL", "TIRE", "TYRE"),
         "33" to listOf("LIGHT", "LIGHTING"),
         "34" to listOf("ADIRS", "ADR", "NAV", "GPS", "RAD ALT"),
         "35" to listOf("OXYGEN", "OXY"),
-        "36" to listOf("PNEU", "PNEUMATIC", "BLEED"),
+        "36" to listOf("BLEED", "PNEU", "PNEUMATIC"),
         "38" to listOf("WATER", "WASTE", "LAV"),
         "49" to listOf("APU"),
         "52" to listOf("DOOR", "CARGO DOOR")
@@ -108,7 +115,8 @@ object CaptainReportAnalyzer {
         .trim(' ', ':', ';', '|')
 
     private fun isNoise(line: String): Boolean {
-        if (noise.any { line == it || line.startsWith("$it ") }) return true
+        if (line in exactNoise) return true
+        if (prefixNoise.any { line.startsWith(it) }) return true
         if (line.matches(Regex("PAGE\\s+\\d+.*"))) return true
         if (line.matches(Regex("\\d{1,2}[:.]\\d{2}.*"))) return true
         return false
