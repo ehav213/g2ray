@@ -20,9 +20,10 @@ data class SearchHit(
 ) {
     override fun toString(): String = buildString {
         append("[").append(manual).append("] ")
+        if (manual == "ESPM") append("INFO ONLY • ")
         if (reference.isNotBlank()) append(reference).append(" — ")
         append(if (title.isNotBlank()) title else entityType)
-        append("\n").append(snippet.replace("\n", " ").take(240))
+        append("\n").append(snippet.replace("\n", " ").take(260))
     }
 }
 
