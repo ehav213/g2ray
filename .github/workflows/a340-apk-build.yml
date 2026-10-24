@@ -43,3 +43,4 @@ jobs:
           name: A340TechnicalAssistant-V1
           path: A340TechnicalAssistant-V1.apk
           if-no-files-found: error
+# build-trigger: androidx-enabled
