@@ -5,6 +5,9 @@
         android:allowBackup="true"
         android:label="A340 Technical Assistant"
         android:theme="@style/Theme.A340TechnicalAssistant">
+        <uses-native-library android:name="libvndksupport.so" android:required="false" />
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
+
         <activity android:name=".PdfPageActivity" android:exported="false" />
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
