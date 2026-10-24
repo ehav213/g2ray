@@ -6,7 +6,6 @@ import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
-import com.google.ai.edge.litertlm.LogSeverity
 import java.io.File
 
 class LocalLlmEngine(private val context: Context) : AutoCloseable {
@@ -21,7 +20,6 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
         if (isLoaded() && loadedPath == modelFile.absolutePath) return
 
         close()
-        Engine.setNativeMinLogSeverity(LogSeverity.ERROR)
         val cache = File(context.cacheDir, "litertlm_cache").apply { mkdirs() }
         val config = EngineConfig(
             modelPath = modelFile.absolutePath,
@@ -34,6 +32,7 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
             engine = candidate
             loadedPath = modelFile.absolutePath
         } catch (t: Throwable) {
+            runCatching { candidate.close() }
             throw IllegalStateException("Local LLM could not initialize: ${t.message}", t)
         }
     }
