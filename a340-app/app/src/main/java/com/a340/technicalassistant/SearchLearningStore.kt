@@ -36,7 +36,14 @@ class SearchLearningStore(context: Context) :
             ON CONFLICT(query_signature,entity_type,entity_id,manual,reference)
             DO UPDATE SET confirm_count=confirm_count+1,last_confirmed=excluded.last_confirmed
             """.trimIndent(),
-            arrayOf(signature, hit.entityType, hit.entityId, hit.manual, hit.reference, System.currentTimeMillis())
+            arrayOf<Any?>(
+                signature,
+                hit.entityType,
+                hit.entityId,
+                hit.manual,
+                hit.reference,
+                System.currentTimeMillis()
+            )
         )
     }
 
