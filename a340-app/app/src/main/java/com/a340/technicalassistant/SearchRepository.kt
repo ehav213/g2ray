@@ -237,16 +237,18 @@ class SearchRepository(dbFile: File) : AutoCloseable {
         val sql = """
             SELECT COALESCE(d.manual,''),COALESCE(d.revision_date,''),COALESCE(d.revision_number,''),
                    COALESCE(d.revision_status,''),
-                   TRIM(COALESCE(p.selected_applicability,'') || ' ' || COALESCE(p.effectivity_json,''))
+                   COALESCE(p.effectivity_json,'')
             FROM documents d
             LEFT JOIN pages p ON p.document_id=d.document_id AND p.pdf_page=?
             WHERE d.filename=?
             LIMIT 1
         """.trimIndent()
-        db.rawQuery(sql, arrayOf(src.pdfPage.toString(), src.filename)).use { c ->
-            if (!c.moveToFirst()) return null
-            return SourceSafety(c.getString(0), c.getString(1), c.getString(2), c.getString(3), c.getString(4))
-        }
+        return runCatching {
+            db.rawQuery(sql, arrayOf(src.pdfPage.toString(), src.filename)).use { c ->
+                if (!c.moveToFirst()) return@runCatching null
+                SourceSafety(c.getString(0), c.getString(1), c.getString(2), c.getString(3), c.getString(4))
+            }
+        }.getOrNull()
     }
 
     private fun buildSafetySummary(hits: List<SearchHit>, aircraftProfile: String): String {
