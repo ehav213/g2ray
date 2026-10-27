@@ -29,12 +29,23 @@ jobs:
           export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Route Technical Master search through bundled FTS5 SQLite
+        shell: bash
+        run: |
+          FILE='a340-app/app/src/main/java/com/a340/technicalassistant/SearchRepository.kt'
+          grep -q 'import android.database.sqlite.SQLiteDatabase' "$FILE"
+          sed -i 's/import android.database.sqlite.SQLiteDatabase/import io.requery.android.database.sqlite.SQLiteDatabase/' "$FILE"
+          grep -q 'import io.requery.android.database.sqlite.SQLiteDatabase' "$FILE"
       - name: Build debug APK
         working-directory: a340-app
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
           ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
         run: gradle :app:assembleDebug --stacktrace
+      - name: Verify bundled FTS5 SQLite native library
+        shell: bash
+        run: |
+          unzip -l a340-app/app/build/outputs/apk/debug/app-debug.apk | grep 'lib/arm64-v8a/libsqlite3x.so'
       - name: Rename APK
         run: cp a340-app/app/build/outputs/apk/debug/app-debug.apk A340TechnicalAssistant-V7.apk
       - name: Upload APK
