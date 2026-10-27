@@ -11,9 +11,41 @@ class EvidenceRepository(dbFile: File) : AutoCloseable {
         resolver: SearchRepository,
         maxItems: Int = 3,
         maxCharsPerItem: Int = 480
+    ): String = buildPack(hits.take(maxItems), resolver, maxCharsPerItem)
+
+    /**
+     * Balanced pack for line maintenance. It prevents MEL-only or TSM-only context
+     * by taking representative evidence from each relevant manual in workflow order.
+     */
+    fun buildLineMaintenanceEvidencePack(
+        hits: List<SearchHit>,
+        resolver: SearchRepository,
+        maxCharsPerItem: Int = 430
+    ): String {
+        val selected = mutableListOf<SearchHit>()
+        val seen = linkedSetOf<String>()
+        val stages = listOf("MEL", "TSM", "AMM", "ASM", "AWM", "IPC", "ESPM")
+        val perStage = mapOf("MEL" to 1, "TSM" to 2, "AMM" to 1, "ASM" to 1, "AWM" to 1, "IPC" to 1, "ESPM" to 1)
+
+        for (manual in stages) {
+            hits.filter { it.manual.equals(manual, ignoreCase = true) }
+                .take(perStage[manual] ?: 1)
+                .forEach { hit ->
+                    val key = "${hit.entityType}|${hit.entityId}|${hit.manual}|${hit.reference}"
+                    if (seen.add(key)) selected += hit
+                }
+        }
+        if (selected.isEmpty()) return buildEvidencePack(hits, resolver)
+        return buildPack(selected.take(8), resolver, maxCharsPerItem)
+    }
+
+    private fun buildPack(
+        selected: List<SearchHit>,
+        resolver: SearchRepository,
+        maxCharsPerItem: Int
     ): String {
         val blocks = mutableListOf<String>()
-        hits.take(maxItems).forEachIndexed { index, hit ->
+        selected.forEachIndexed { index, hit ->
             val src = runCatching { resolver.resolve(hit) }.getOrNull()
             val body = when (hit.entityType) {
                 "task" -> taskEvidence(hit.entityId)
