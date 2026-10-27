@@ -59,6 +59,7 @@ class V7MainActivity : AppCompatActivity() {
         val btnConfirm: Button = a.findViewById(R.id.btnConfirm)
         val txtEvidenceHeading: TextView = a.findViewById(R.id.txtEvidenceHeading)
         val txtAnalysis: TextView = a.findViewById(R.id.txtAnalysis)
+        val txtSourcePacketHeading: TextView = a.findViewById(R.id.txtSourcePacketHeading)
         val txtAiHeading: TextView = a.findViewById(R.id.txtAiHeading)
         val aiProgressBox: View = a.findViewById(R.id.aiProgressBox)
         val txtAiProgress: TextView = a.findViewById(R.id.txtAiProgress)
@@ -79,6 +80,7 @@ class V7MainActivity : AppCompatActivity() {
     private val appLog by lazy { AppLog(this) }
     private var repo: SearchRepository? = null
     private var evidence: EvidenceRepository? = null
+    private var workflow: LineMaintenanceWorkflow? = null
     private var hits = emptyList<SearchHit>()
     private var cards = emptyList<Any>()
     private var mode = PhotoMode.PFR
@@ -86,6 +88,8 @@ class V7MainActivity : AppCompatActivity() {
     private var queryForLearning = ""
     private var safety = ""
     private var openedHit: SearchHit? = null
+    private var lineMaintenanceMode = false
+    private var melDispatchStatus = MelDispatchStatus.NO_MATCH
     private var aiRunning = false
     private var aiProgressValue = 0
     private var aiStage = "IDLE"
@@ -95,7 +99,7 @@ class V7MainActivity : AppCompatActivity() {
         override fun run() {
             if (!aiRunning) return
             val elapsed = ((SystemClock.elapsedRealtime() - aiStartedAt) / 1000L).coerceAtLeast(0L)
-            if (aiProgressValue < 92) aiProgressValue += 1
+            if (aiProgressValue < 90) aiProgressValue += 1
             renderAiProgress(elapsed)
             mainHandler.postDelayed(this, 1500L)
         }
@@ -146,7 +150,7 @@ class V7MainActivity : AppCompatActivity() {
         super.onCreate(state)
         setContentView(R.layout.activity_v7_main)
         b = Views(this)
-        logInfo("APP_START", "version 0.7.4")
+        logInfo("APP_START", "version 0.7.8")
         openDb()
         modelStatus()
 
@@ -212,8 +216,10 @@ class V7MainActivity : AppCompatActivity() {
             return
         }
         runCatching {
-            repo?.close(); evidence?.close()
-            repo = SearchRepository(f); evidence = EvidenceRepository(f)
+            workflow?.close(); repo?.close(); evidence?.close()
+            repo = SearchRepository(f)
+            evidence = EvidenceRepository(f)
+            workflow = LineMaintenanceWorkflow(f, repo!!)
             val ms = repo!!.manuals()
             val integrated = ms.count { it.status == "INTEGRATED" }
             status("DATABASE READY • A340 Master v${repo!!.architectureVersion()} • $integrated manuals • OFFLINE")
@@ -278,12 +284,59 @@ class V7MainActivity : AppCompatActivity() {
         b.btnConfirm.visibility = View.GONE
         b.txtAnswer.visibility = View.GONE
         b.txtAiHeading.visibility = View.GONE
+        b.txtSourcePacketHeading.visibility = View.GONE
         b.txtEvidenceHeading.visibility = View.VISIBLE
         b.txtAnalysis.visibility = View.VISIBLE
         b.txtAnalysis.text = "Searching approved A340 technical evidence…"
         b.listResults.visibility = View.GONE
         scrollTo(b.txtEvidenceHeading)
         val profile = b.editAircraft.text.toString().trim()
+
+        lineMaintenanceMode = !label.startsWith("COMPONENT PHOTO")
+        if (lineMaintenanceMode) {
+            val wf = workflow ?: return toast("Line-maintenance workflow unavailable")
+            b.txtEvidenceHeading.text = "LINE MAINTENANCE GUIDANCE"
+            io.execute {
+                runCatching { wf.run(q, profile) }.onSuccess { bundle ->
+                    hits = bundle.hits
+                    queryForLearning = q
+                    safety = bundle.safetySummary + "\nMEL DISPATCH STATUS: ${bundle.dispatchStatus.name}"
+                    melDispatchStatus = bundle.dispatchStatus
+                    openedHit = null
+                    ui {
+                        b.listResults.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, hits)
+                        b.txtAnalysis.text = bundle.workflowSummary
+                        if (hits.isNotEmpty()) {
+                            sizeList(b.listResults, hits.size, 82, 8)
+                            b.txtSourcePacketHeading.visibility = View.VISIBLE
+                            b.listResults.visibility = View.VISIBLE
+                            b.btnAnswer.isEnabled = true
+                            b.txtAiHeading.visibility = View.VISIBLE
+                        } else {
+                            b.listResults.visibility = View.GONE
+                            b.txtSourcePacketHeading.visibility = View.GONE
+                            b.txtAiHeading.visibility = View.GONE
+                            b.txtAnalysis.append("\n\nNO APPROVED SOURCE RESULT — verify the technical library and refine the fault description.")
+                        }
+                        status("$label • MEL-first workflow • ${hits.size} source result(s)")
+                        logInfo("LINE_WORKFLOW_OK", "$label | MEL=${bundle.melHits.size} | status=${bundle.dispatchStatus} | sources=${hits.size}")
+                        scrollTo(b.txtEvidenceHeading)
+                    }
+                }.onFailure { error ->
+                    ui {
+                        b.txtAnalysis.text = "LINE MAINTENANCE RETRIEVAL ERROR\n${error.message ?: error.javaClass.simpleName}"
+                        b.listResults.visibility = View.GONE
+                        b.txtSourcePacketHeading.visibility = View.GONE
+                        status("Retrieval failed • see ⚙ Settings Log")
+                        logError("LINE_WORKFLOW_FAIL", error, label)
+                        scrollTo(b.txtEvidenceHeading)
+                    }
+                }
+            }
+            return
+        }
+
+        b.txtEvidenceHeading.text = "APPROVED EVIDENCE"
         io.execute {
             runCatching { r.searchAi(q, profile) }.onSuccess { bundle ->
                 val learned = learning.rerank(q, bundle.hits)
@@ -299,11 +352,14 @@ class V7MainActivity : AppCompatActivity() {
                         "\n${bundle.safetySummary}"
                     if (hits.isNotEmpty()) {
                         sizeList(b.listResults, hits.size, 72, 5)
+                        b.txtSourcePacketHeading.text = "SOURCE DOCUMENT RESULTS — TAP TO OPEN ORIGINAL PDF PAGE"
+                        b.txtSourcePacketHeading.visibility = View.VISIBLE
                         b.listResults.visibility = View.VISIBLE
                         b.btnAnswer.isEnabled = true
                         b.txtAiHeading.visibility = View.VISIBLE
                     } else {
                         b.listResults.visibility = View.GONE
+                        b.txtSourcePacketHeading.visibility = View.GONE
                         b.txtAiHeading.visibility = View.GONE
                         b.txtAnalysis.append("\n\nNO APPROVED EVIDENCE RESULT — refine the query or check the technical source.")
                     }
@@ -315,6 +371,7 @@ class V7MainActivity : AppCompatActivity() {
                 ui {
                     b.txtAnalysis.text = "RETRIEVAL ERROR\n${error.message ?: error.javaClass.simpleName}"
                     b.listResults.visibility = View.GONE
+                    b.txtSourcePacketHeading.visibility = View.GONE
                     status("Retrieval failed • see ⚙ Settings Log")
                     logError("RETRIEVAL_FAIL", error, label)
                     scrollTo(b.txtEvidenceHeading)
@@ -348,9 +405,13 @@ class V7MainActivity : AppCompatActivity() {
                     logInfo("AI_MODEL_LOAD_OK", "${SystemClock.elapsedRealtime() - loadStart} ms | ${model.name}")
                 }
                 ui { updateAiProgress(35, "BUILDING APPROVED EVIDENCE") }
-                val pack = er.buildEvidencePack(hits, r)
+                val pack = if (lineMaintenanceMode) {
+                    er.buildLineMaintenanceEvidencePack(hits, r)
+                } else {
+                    er.buildEvidencePack(hits, r)
+                }
                 require(pack.isNotBlank()) { "No approved evidence could be assembled" }
-                logInfo("AI_EVIDENCE_READY", "${pack.length} chars | ${hits.size} hits")
+                logInfo("AI_EVIDENCE_READY", "${pack.length} chars | ${hits.size} hits | lineMode=$lineMaintenanceMode | MEL=$melDispatchStatus")
                 Triple(model, pack, q)
             }.onSuccess { (_, pack, question) ->
                 val stream = StringBuilder()
@@ -376,7 +437,7 @@ class V7MainActivity : AppCompatActivity() {
                                     stream.append(incoming)
                                 }
                                 b.txtAnswer.text = stream.toString()
-                                val estimated = (48 + stream.length / 32).coerceAtMost(94)
+                                val estimated = (48 + stream.length / 40).coerceAtMost(92)
                                 updateAiProgress(estimated, "STREAMING ANSWER")
                                 if (!firstChunkLogged) {
                                     firstChunkLogged = true
@@ -467,7 +528,7 @@ class V7MainActivity : AppCompatActivity() {
         val q = queryForLearning.ifBlank { b.editQuery.text.toString().trim() }
         if (q.isBlank()) return
         learning.confirm(q, h)
-        b.txtAnalysis.append("\nLEARNED: ${h.manual} ${h.reference} confirmed for ranking only.")
+        b.txtAnalysis.append("\nLEARNED: ${h.manual} ${h.reference} confirmed for ranking only. MEL-first workflow order is never changed.")
         logInfo("SAFE_LEARNING_CONFIRM", "${h.manual} | ${h.reference}")
         toast("Safe learning confirmation saved")
     }
@@ -647,7 +708,7 @@ class V7MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         stopAiProgress(hide = false)
         logInfo("APP_DESTROY")
-        repo?.close(); evidence?.close(); pdfs.close(); llm.close(); learning.close(); io.shutdown()
+        workflow?.close(); repo?.close(); evidence?.close(); pdfs.close(); llm.close(); learning.close(); io.shutdown()
         super.onDestroy()
     }
 }
