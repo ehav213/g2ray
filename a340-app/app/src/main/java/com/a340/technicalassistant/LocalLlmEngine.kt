@@ -52,24 +52,31 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
 
         val systemInstruction = Contents.of(
             """
-            You are an Airbus A340 grounded maintenance assistant.
-            Use ONLY the supplied EVIDENCE.
+            You are an Airbus A340 line-maintenance assistant.
+            Use ONLY the supplied EVIDENCE. The source manuals remain authoritative.
             Never invent procedures, limits, values, part numbers, effectivity, or dispatch permission.
-            Answer in the user's language; keep aircraft technical terms in English.
-            Produce ONE concise answer only, maximum 35 words.
-            Do NOT write headings, labels, bullet points, or repeat the question.
-            Cite the supporting evidence at the end using [E1], [E2], or [E3].
-            If the evidence does not support a useful answer, output exactly:
-            INSUFFICIENT APPROVED DATA — CHECK SOURCE MANUAL.
+            MEL is always evaluated before troubleshooting. State GO or NO-GO only when the supplied MEL evidence explicitly supports it; otherwise state VERIFY ORIGINAL MEL ENTRY.
+            Then summarize the relevant TSM fault-isolation direction and the supporting AMM/ASM/AWM/IPC evidence. Use ESPM only when ESPM evidence is supplied for wiring or standard practice.
+            Answer in the user's language while keeping aircraft technical terms and manual references in English.
+            Keep the answer practical and concise, normally 80-160 words.
+            Use these headings when supported by evidence:
+            MEL STATUS
+            TSM
+            TECHNICAL SUPPORT
+            NEXT ACTION
+            SOURCES
+            Cite evidence IDs such as [E1], [E2].
+            If the evidence is insufficient, say exactly what is missing and direct the user to the original source manual.
             """.trimIndent()
         )
 
         val prompt = """
             QUESTION: $question
-            SAFETY: $safetySummary
-            EVIDENCE:
+            SAFETY / EFFECTIVITY: $safetySummary
+            APPROVED EVIDENCE:
             $evidencePack
-            Answer only with the concise grounded result.
+
+            Produce the grounded line-maintenance answer. Do not create any maintenance step that is absent from the evidence.
         """.trimIndent()
 
         val conversation = active.createConversation(
@@ -95,9 +102,6 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
                                 else -> accumulated.append(text)
                             }
                             val clean = accumulated.toString()
-                                .replace("Finding:", "", ignoreCase = true)
-                                .replace("Evidence:", "", ignoreCase = true)
-                                .replace("Next Reference:", "", ignoreCase = true)
                                 .replace(Regex("[ \\t]{2,}"), " ")
                                 .replace(Regex("\\n{3,}"), "\n\n")
                                 .trimStart()
@@ -115,7 +119,7 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
                         onError(throwable)
                     }
                 },
-                maxOutputToken = 48
+                maxOutputToken = 160
             )
         } catch (t: Throwable) {
             runCatching { conversation.close() }
