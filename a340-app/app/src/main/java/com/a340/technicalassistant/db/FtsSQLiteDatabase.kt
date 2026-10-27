@@ -2,7 +2,6 @@ package com.a340.technicalassistant.db
 
 import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.SQLiteStatement
-import androidx.sqlite.driver.bundled.BundledSQLite
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 
 /**
@@ -16,6 +15,7 @@ class FtsSQLiteDatabase private constructor(
 
     companion object {
         const val OPEN_READONLY: Int = 1
+        private const val SQLITE_OPEN_FULLMUTEX: Int = 65536
 
         fun openDatabase(path: String, factory: Any?, flags: Int): FtsSQLiteDatabase {
             @Suppress("UNUSED_VARIABLE")
@@ -23,7 +23,7 @@ class FtsSQLiteDatabase private constructor(
             @Suppress("UNUSED_VARIABLE")
             val requestedReadOnly = flags and OPEN_READONLY != 0
 
-            val openFlags = BundledSQLite.SQLITE_OPEN_READONLY or BundledSQLite.SQLITE_OPEN_FULLMUTEX
+            val openFlags = OPEN_READONLY or SQLITE_OPEN_FULLMUTEX
             return FtsSQLiteDatabase(BundledSQLiteDriver().open(path, openFlags))
         }
     }
