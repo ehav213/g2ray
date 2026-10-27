@@ -93,7 +93,7 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="SETTINGS & DIAGNOSTICS"
+                    android:text="SETTINGS &amp; DIAGNOSTICS"
                     android:textColor="#DCE8F2"
                     android:textSize="13sp"
                     android:textStyle="bold" />
