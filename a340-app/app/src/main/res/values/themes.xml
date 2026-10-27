@@ -1,7 +1,14 @@
 <resources>
-    <style name="Theme.A340TechnicalAssistant" parent="Theme.MaterialComponents.DayNight.DarkActionBar">
-        <item name="colorPrimary">#1F4B99</item>
-        <item name="colorPrimaryVariant">#173B79</item>
+    <style name="Theme.A340TechnicalAssistant" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">#2463B5</item>
+        <item name="colorPrimaryVariant">#194A8A</item>
+        <item name="colorSecondary">#1C806F</item>
         <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowBackground">#0B0F14</item>
+        <item name="android:statusBarColor">#0B0F14</item>
+        <item name="android:navigationBarColor">#0B0F14</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
     </style>
 </resources>
