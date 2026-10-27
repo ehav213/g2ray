@@ -15,7 +15,12 @@ class AppLog(context: Context) {
     private val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
 
     @Synchronized
-    fun i(event: String, detail: String = "") = write("INFO", event, detail, null)
+    fun i(event: String, detail: String = "") = write(
+        "INFO",
+        event,
+        if (event == "APP_START") "version ${BuildConfig.VERSION_NAME}" else detail,
+        null
+    )
 
     @Synchronized
     fun e(event: String, error: Throwable? = null, detail: String = "") =
