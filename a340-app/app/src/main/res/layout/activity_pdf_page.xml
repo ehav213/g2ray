@@ -1,38 +1,107 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:background="#0B0F14">
+    android:background="#071019">
 
     <TextView
         android:id="@+id/txtPdfTitle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:padding="10dp"
-        android:textColor="#F4F7FB"
+        android:paddingStart="12dp"
+        android:paddingTop="10dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="6dp"
+        android:maxLines="2"
+        android:ellipsize="end"
+        android:textColor="#F5F8FB"
+        android:textSize="13sp"
         android:textStyle="bold" />
 
-    <Button
-        android:id="@+id/btnShareSourcePage"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginStart="10dp"
-        android:layout_marginEnd="10dp"
-        android:layout_marginBottom="8dp"
-        android:text="SAVE / SHARE SOURCE PAGE PDF" />
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:paddingBottom="7dp"
+        android:orientation="horizontal">
 
-    <HorizontalScrollView
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnPrevPage"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="0dp"
+            android:layout_height="42dp"
+            android:layout_weight="1"
+            android:text="‹ PREV"
+            android:textSize="9sp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnZoomOut"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="48dp"
+            android:layout_height="42dp"
+            android:layout_marginStart="4dp"
+            android:text="−"
+            android:textSize="18sp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnFitPage"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="58dp"
+            android:layout_height="42dp"
+            android:layout_marginStart="4dp"
+            android:text="FIT"
+            android:textSize="9sp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnZoomIn"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="48dp"
+            android:layout_height="42dp"
+            android:layout_marginStart="4dp"
+            android:text="+"
+            android:textSize="16sp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnNextPage"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="0dp"
+            android:layout_height="42dp"
+            android:layout_marginStart="4dp"
+            android:layout_weight="1"
+            android:text="NEXT ›"
+            android:textSize="9sp" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/txtPdfHint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="6dp"
+        android:text="Pinch to zoom • drag to pan • double-tap to zoom"
+        android:textColor="#7890A8"
+        android:textSize="10sp" />
+
+    <com.a340.technicalassistant.ZoomImageView
+        android:id="@+id/pdfImage"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1">
-        <ScrollView
-            android:layout_width="wrap_content"
-            android:layout_height="match_parent">
-            <ImageView
-                android:id="@+id/pdfImage"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:adjustViewBounds="true" />
-        </ScrollView>
-    </HorizontalScrollView>
+        android:layout_weight="1"
+        android:background="#FFFFFF" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnShareSourcePage"
+        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+        android:layout_width="match_parent"
+        android:layout_height="46dp"
+        android:layout_marginStart="8dp"
+        android:layout_marginTop="6dp"
+        android:layout_marginEnd="8dp"
+        android:layout_marginBottom="8dp"
+        android:text="SAVE / SHARE THIS ORIGINAL SOURCE PAGE PDF"
+        android:textSize="10sp"
+        app:strokeColor="#3D5876" />
 </LinearLayout>
