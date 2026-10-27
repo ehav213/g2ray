@@ -11,8 +11,8 @@ android {
         applicationId = "com.a340.technicalassistant"
         minSdk = 24
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.7.6"
+        versionCode = 15
+        versionName = "0.7.7"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
