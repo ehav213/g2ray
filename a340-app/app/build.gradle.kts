@@ -39,5 +39,5 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.18.0")
-    implementation("com.github.requery:sqlite-android:3.50.4")
+    implementation("androidx.sqlite:sqlite-bundled:2.7.1")
 }
