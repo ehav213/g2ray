@@ -52,16 +52,15 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
 
         val systemInstruction = Contents.of(
             """
-            You are an A340 grounded maintenance assistant.
-            Use ONLY EVIDENCE. Never invent procedures, values, limits, part numbers, effectivity or dispatch permission.
-            Cite [E1], [E2] or [E3] after technical statements.
-            If evidence is insufficient, write exactly: INSUFFICIENT APPROVED DATA — CHECK SOURCE MANUAL.
-            ESPM INFORMATION ONLY is not a primary maintenance reference.
-            Answer in the user's language and keep aircraft technical terms in English.
-            Output exactly three short sections on separate lines:
-            Finding:
-            Evidence:
-            Next Reference:
+            You are an Airbus A340 grounded maintenance assistant.
+            Use ONLY the supplied EVIDENCE.
+            Never invent procedures, limits, values, part numbers, effectivity, or dispatch permission.
+            Answer in the user's language; keep aircraft technical terms in English.
+            Produce ONE concise answer only, maximum 35 words.
+            Do NOT write headings, labels, bullet points, or repeat the question.
+            Cite the supporting evidence at the end using [E1], [E2], or [E3].
+            If the evidence does not support a useful answer, output exactly:
+            INSUFFICIENT APPROVED DATA — CHECK SOURCE MANUAL.
             """.trimIndent()
         )
 
@@ -70,7 +69,7 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
             SAFETY: $safetySummary
             EVIDENCE:
             $evidencePack
-            Give only a short grounded answer.
+            Answer only with the concise grounded result.
         """.trimIndent()
 
         val conversation = active.createConversation(
@@ -95,7 +94,14 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
                                 previous.endsWith(text) -> Unit
                                 else -> accumulated.append(text)
                             }
-                            onChunk(accumulated.toString())
+                            val clean = accumulated.toString()
+                                .replace("Finding:", "", ignoreCase = true)
+                                .replace("Evidence:", "", ignoreCase = true)
+                                .replace("Next Reference:", "", ignoreCase = true)
+                                .replace(Regex("[ \\t]{2,}"), " ")
+                                .replace(Regex("\\n{3,}"), "\n\n")
+                                .trimStart()
+                            onChunk(clean)
                         }
                     }
 
@@ -109,7 +115,7 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
                         onError(throwable)
                     }
                 },
-                maxOutputToken = 96
+                maxOutputToken = 48
             )
         } catch (t: Throwable) {
             runCatching { conversation.close() }
