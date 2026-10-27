@@ -25,16 +25,22 @@ data class LineMaintenanceResult(
  * Line-maintenance retrieval sequence:
  * MEL -> TSM -> AMM -> ASM -> AWM -> IPC -> ESPM (only for wiring/ESPM intent).
  *
- * MEL matching is intentionally stricter than the general technical search. The
- * reported fault wording does not need to be identical to the MEL wording, but a
- * MEL candidate must match the affected system/item and, when detectable, the ATA.
- * Generic single-word overlap is not accepted as a valid dispatch match.
+ * MEL lookup is equipment/item based, not fault-phrase based. A reported fault such
+ * as "APU AUTO SHUTDOWN" is first normalized to the dispatch equipment item APU.
+ * Where an approved canonical MEL mapping is known, that MEL item is searched first.
  */
 class LineMaintenanceWorkflow(
     dbFile: File,
     private val resolver: SearchRepository
 ) : AutoCloseable {
     private val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
+
+    private data class MelTarget(
+        val coreTerms: List<String>,
+        val canonicalQueries: List<String>,
+        val preferredReferences: List<String>,
+        val description: String
+    )
 
     fun run(query: String, aircraftProfile: String): LineMaintenanceResult {
         val analysis = QueryIntelligence.analyze(query)
@@ -82,7 +88,8 @@ class LineMaintenanceWorkflow(
             ipc = ipc,
             espm = espm,
             includeEspm = includeEspm,
-            safety = base.safetySummary
+            safety = base.safetySummary,
+            query = query
         )
 
         return LineMaintenanceResult(
@@ -97,11 +104,38 @@ class LineMaintenanceWorkflow(
         )
     }
 
+    private fun melTarget(query: String, analysis: QueryIntelligence.Analysis): MelTarget {
+        val upper = query.uppercase()
+
+        // Approved mapping supplied for the operator MEL: any APU dispatch concern is
+        // first checked against MEL 49-10-01 Power Plant (APU). Fault-isolation wording
+        // such as AUTO SHUTDOWN remains a TSM concern and must not replace the MEL item.
+        if (upper.contains("APU") || analysis.ata == "49") {
+            return MelTarget(
+                coreTerms = listOf("APU", "POWER PLANT"),
+                canonicalQueries = listOf(
+                    "49-10-01",
+                    "POWER PLANT APU",
+                    "APU"
+                ),
+                preferredReferences = listOf("49-10-01", "49-10-01A", "49-10-01B"),
+                description = "MEL 49-10-01 — Power Plant (APU)"
+            )
+        }
+
+        val core = melCoreTerms(query, analysis)
+        return MelTarget(
+            coreTerms = core,
+            canonicalQueries = listOf(query),
+            preferredReferences = emptyList(),
+            description = core.joinToString(" / ").ifBlank { "affected equipment item" }
+        )
+    }
+
     /**
-     * MEL is not searched like the other manuals. We first retrieve candidates,
-     * then reject results that do not match the fault's core equipment/system.
-     * Example: "APU AUTO SHUTDOWN" may legitimately map to an MEL item named
-     * "APU" rather than the exact fault phrase, but an unrelated ATA/item must not.
+     * MEL is searched from the equipment/item level. Canonical item queries are run
+     * before the raw fault wording. Example: APU AUTO SHUTDOWN -> MEL 49-10-01 Power
+     * Plant (APU), while AUTO SHUTDOWN itself is used for the subsequent TSM stage.
      */
     private fun melStageHits(
         query: String,
@@ -110,18 +144,20 @@ class LineMaintenanceWorkflow(
         baseHits: List<SearchHit>,
         limit: Int
     ): List<SearchHit> {
-        val direct = searchManual("MEL", query, 80)
+        val target = melTarget(query, analysis)
+        val canonical = target.canonicalQueries.flatMap { searchManual("MEL", it, 50) }
+        val raw = searchManual("MEL", query, 50)
         val fallback = baseHits.filter { it.manual.equals("MEL", ignoreCase = true) }
+
         val merged = mutableListOf<SearchHit>()
         val seen = linkedSetOf<String>()
-        (direct + fallback).forEach { h ->
+        (canonical + raw + fallback).forEach { h ->
             val key = "${h.entityType}|${h.entityId}|${h.manual}|${h.reference}"
             if (seen.add(key)) merged += h
         }
 
-        val core = melCoreTerms(query, analysis)
         return merged
-            .map { it to melRelevanceScore(it, query, analysis, core) }
+            .map { it to melRelevanceScore(it, query, analysis, target) }
             .filter { (_, score) -> score < 1000 }
             .sortedWith(
                 compareBy<Pair<SearchHit, Int>> { it.second }
@@ -145,7 +181,6 @@ class LineMaintenanceWorkflow(
             .distinct()
             .toMutableList()
 
-        // Keep known system identifiers even when the fault text is otherwise generic.
         if (query.uppercase().contains("APU") && "APU" !in raw) raw += "APU"
         if (analysis.ata == "49" && raw.isEmpty()) raw += "APU"
         return raw.take(8)
@@ -155,7 +190,7 @@ class LineMaintenanceWorkflow(
         hit: SearchHit,
         query: String,
         analysis: QueryIntelligence.Analysis,
-        coreTerms: List<String>
+        target: MelTarget
     ): Int {
         val resolved = runCatching { resolver.resolve(hit) }.getOrNull()
         val hay = listOf(hit.reference, hit.title, hit.snippet, resolved?.content.orEmpty())
@@ -166,30 +201,40 @@ class LineMaintenanceWorkflow(
         val normalizedQuery = query.uppercase().replace(Regex("\\s+"), " ").trim()
         val exactPhrase = normalizedQuery.length >= 6 && hay.contains(normalizedQuery)
 
-        // If ATA can be determined, reject an explicit different ATA result.
         val ata = analysis.ata
         if (!ata.isNullOrBlank()) {
             val explicitAta = Regex("(?:ATA\\s*)?(\\d{2})[- ./]").find(hay)?.groupValues?.getOrNull(1)
             if (explicitAta != null && explicitAta != ata) return 1000
         }
 
+        // Canonical MEL item references outrank all semantic candidates. For APU this
+        // makes 49-10-01 / 49-10-01A / 49-10-01B the dispatch item shown first.
+        val refUpper = hit.reference.uppercase()
+        val preferredIndex = target.preferredReferences.indexOfFirst { pref ->
+            refUpper.startsWith(pref) || hay.contains(pref)
+        }
+        if (preferredIndex >= 0) return -500 + preferredIndex
+
+        val coreTerms = target.coreTerms
         if (coreTerms.isNotEmpty()) {
-            val matched = coreTerms.count { term -> containsWholeTerm(hay, term) }
+            val matched = coreTerms.count { term ->
+                term.split(' ').all { token -> containsWholeTerm(hay, token) }
+            }
             if (matched == 0) return 1000
-            // For multi-item queries, require at least half of the core terms.
-            val required = if (coreTerms.size <= 2) 1 else (coreTerms.size + 1) / 2
+
+            // APU canonical mapping may be titled simply "Power Plant (APU)"; one
+            // canonical equipment term is enough after ATA 49 has already matched.
+            val required = if (analysis.ata == "49" || query.uppercase().contains("APU")) 1
+            else if (coreTerms.size <= 2) 1 else (coreTerms.size + 1) / 2
             if (matched < required) return 1000
 
             var score = (coreTerms.size - matched) * 20
             if (exactPhrase) score -= 100
-            // Prefer a compact MEL item title such as "APU" over a loosely related
-            // compound item such as "APU BLEED ..." when the fault only identifies APU.
             val titleWords = Regex("[A-Z0-9][A-Z0-9_./-]*").findAll(hit.title.uppercase()).count()
             score += titleWords.coerceAtMost(20)
             return score
         }
 
-        // With no reliable core equipment term, do not accept MEL as a dispatch match.
         return if (exactPhrase) 0 else 1000
     }
 
@@ -257,9 +302,9 @@ class LineMaintenanceWorkflow(
         if (melHits.isEmpty()) return MelDispatchStatus.NO_MATCH
         if (profile.isBlank()) return MelDispatchStatus.VERIFY_REQUIRED
 
-        val core = melCoreTerms(query, analysis)
+        val target = melTarget(query, analysis)
         val eligible = melHits.filter {
-            effectivityPenalty(it, profile) == 0 && melRelevanceScore(it, query, analysis, core) < 1000
+            effectivityPenalty(it, profile) == 0 && melRelevanceScore(it, query, analysis, target) < 1000
         }
         if (eligible.isEmpty()) return MelDispatchStatus.VERIFY_REQUIRED
 
@@ -327,17 +372,20 @@ class LineMaintenanceWorkflow(
         ipc: List<SearchHit>,
         espm: List<SearchHit>,
         includeEspm: Boolean,
-        safety: String
+        safety: String,
+        query: String
     ): String = buildString {
+        val target = melTarget(query, analysis)
         append("LINE MAINTENANCE WORKFLOW")
         if (!analysis.ata.isNullOrBlank()) append(" • ATA ").append(analysis.ata)
         append("\n\n1 — MEL FIRST")
-        append("\nMEL matching uses affected system/item + ATA relevance; MEL wording does not have to be identical to the PFR/TSM fault wording.")
+        append("\nDispatch item target: ").append(target.description)
+        append("\nFault wording is used to identify the affected equipment; MEL is then checked by equipment/item, not by requiring the MEL title to repeat the fault message.")
         when (dispatch) {
             MelDispatchStatus.GO_EXPLICIT -> append("\nMEL DISPATCH: GO wording detected in a relevance- and effectivity-matched MEL candidate — only if every MEL condition, (M)/(O) procedure and limitation is satisfied. Open the original MEL source below.")
             MelDispatchStatus.NO_GO_EXPLICIT -> append("\nMEL DISPATCH: NO-GO / operative requirement wording detected in a relevance- and effectivity-matched MEL candidate. Open the original MEL source below before any dispatch decision.")
             MelDispatchStatus.VERIFY_REQUIRED -> append("\nMEL CHECK REQUIRES ORIGINAL SOURCE VERIFICATION — effectivity may be missing/unmatched or the candidate is not strong enough for an automatic dispatch decision. AI must not infer dispatch permission.")
-            MelDispatchStatus.NO_MATCH -> append("\nNO RELEVANT MEL ITEM MATCHED THE REPORTED FAULT/SYSTEM. This does NOT mean GO. Verify MEL applicability before dispatch.")
+            MelDispatchStatus.NO_MATCH -> append("\nNO RELEVANT MEL ITEM MATCHED THE AFFECTED EQUIPMENT. This does NOT mean GO. Verify MEL applicability before dispatch.")
         }
         append("\nRelevant MEL sources: ").append(mel.size)
 
