@@ -25,9 +25,9 @@ data class LineMaintenanceResult(
  * Line-maintenance retrieval sequence:
  * MEL -> TSM -> AMM -> ASM -> AWM -> IPC -> ESPM (only for wiring/ESPM intent).
  *
- * Dispatch classification is conservative: GO/NO-GO is emitted only when explicit
- * wording is present in the indexed MEL source text. Otherwise the app requires
- * verification of the original MEL entry.
+ * Dispatch classification is deliberately conservative. GO/NO-GO is emitted only
+ * when explicit wording is found in a MEL candidate whose effectivity matches the
+ * supplied aircraft profile. Otherwise the original MEL entry must be verified.
  */
 class LineMaintenanceWorkflow(
     dbFile: File,
@@ -48,7 +48,7 @@ class LineMaintenanceWorkflow(
         val ipc = stageHits("IPC", query, aircraftProfile, 3, base.hits)
         val espm = if (includeEspm) stageHits("ESPM", query, aircraftProfile, 3, base.hits) else emptyList()
 
-        val dispatch = classifyMel(mel)
+        val dispatch = classifyMel(mel, aircraftProfile)
         val packet = linkedSetOf<String>()
         val ordered = mutableListOf<SearchHit>()
 
@@ -146,9 +146,14 @@ class LineMaintenanceWorkflow(
         return out
     }
 
-    private fun classifyMel(melHits: List<SearchHit>): MelDispatchStatus {
+    private fun classifyMel(melHits: List<SearchHit>, profile: String): MelDispatchStatus {
         if (melHits.isEmpty()) return MelDispatchStatus.NO_MATCH
-        val text = melHits.take(4).joinToString("\n") { hit ->
+        if (profile.isBlank()) return MelDispatchStatus.VERIFY_REQUIRED
+
+        val effectivityMatched = melHits.filter { effectivityPenalty(it, profile) == 0 }
+        if (effectivityMatched.isEmpty()) return MelDispatchStatus.VERIFY_REQUIRED
+
+        val text = effectivityMatched.take(3).joinToString("\n") { hit ->
             val source = runCatching { resolver.resolve(hit) }.getOrNull()
             listOf(hit.title, hit.snippet, source?.content.orEmpty()).joinToString(" ")
         }.uppercase()
@@ -218,9 +223,9 @@ class LineMaintenanceWorkflow(
         if (!analysis.ata.isNullOrBlank()) append(" • ATA ").append(analysis.ata)
         append("\n\n1 — MEL FIRST")
         when (dispatch) {
-            MelDispatchStatus.GO_EXPLICIT -> append("\nMEL DISPATCH: GO wording detected — only if every MEL condition, (M)/(O) procedure and effectivity requirement is satisfied. Open the original MEL source below.")
-            MelDispatchStatus.NO_GO_EXPLICIT -> append("\nMEL DISPATCH: NO-GO / operative requirement wording detected. Open the original MEL source below before any dispatch decision.")
-            MelDispatchStatus.VERIFY_REQUIRED -> append("\nMEL ENTRY FOUND, but GO/NO-GO is not explicit in the indexed text. VERIFY ORIGINAL MEL ENTRY — AI must not infer dispatch permission.")
+            MelDispatchStatus.GO_EXPLICIT -> append("\nMEL DISPATCH: GO wording detected in an effectivity-matched MEL candidate — only if every MEL condition, (M)/(O) procedure and limitation is satisfied. Open the original MEL source below.")
+            MelDispatchStatus.NO_GO_EXPLICIT -> append("\nMEL DISPATCH: NO-GO / operative requirement wording detected in an effectivity-matched MEL candidate. Open the original MEL source below before any dispatch decision.")
+            MelDispatchStatus.VERIFY_REQUIRED -> append("\nMEL CHECK REQUIRES ORIGINAL SOURCE VERIFICATION — either aircraft effectivity/MSN is missing, no effectivity-matched MEL candidate was confirmed, or GO/NO-GO wording is not explicit. AI must not infer dispatch permission.")
             MelDispatchStatus.NO_MATCH -> append("\nNO DIRECT MEL MATCH FOUND in the indexed MEL. This does NOT mean GO. Verify MEL applicability before dispatch.")
         }
         append("\nMEL sources: ").append(mel.size)
@@ -234,10 +239,10 @@ class LineMaintenanceWorkflow(
         else append("\n7 — ESPM\nNot searched unless wiring/connector/standard-practice context is requested.")
 
         append("\n\nAIRCRAFT EFFECTIVITY\n")
-        if (profile.isBlank()) append("NOT VERIFIED — enter REG / MSN / effectivity before applying a task.")
+        if (profile.isBlank()) append("NOT VERIFIED — enter REG / MSN / effectivity before applying a task or accepting a MEL dispatch status.")
         else append("Profile: ").append(profile).append(" — matching sources are ranked first; verify applicability in the source manual.")
 
-        append("\n\nSOURCE DOCUMENT PACKET\nTap any source below to open the exact original PDF page. MEL is always listed first, followed by TSM, AMM, ASM, AWM, IPC, and ESPM when applicable.")
+        append("\n\nSOURCE DOCUMENT PACKET\nTap any source below to open the exact original PDF page. MEL is always listed first, followed by TSM, AMM, ASM, AWM, IPC, and ESPM when applicable. Use SAVE / SHARE SOURCE PAGE PDF to separate the displayed source page.")
         append("\n\n").append(safety)
     }
 
