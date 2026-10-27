@@ -1,8 +1,10 @@
 package com.a340.technicalassistant
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Bundle
 import android.view.View
@@ -81,6 +83,14 @@ class V7MainActivity : AppCompatActivity() {
     private val takePhoto = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
         if (ok) photoUri?.let(::ocr) else status("Photo capture cancelled")
     }
+    private val galleryPicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            status("IMAGE SELECTED • reading from phone…")
+            ocr(uri)
+        } else {
+            status("Image selection cancelled")
+        }
+    }
     private val camPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) startCamera() else status("Camera permission is required")
     }
@@ -95,9 +105,9 @@ class V7MainActivity : AppCompatActivity() {
         b.btnImportDb.setOnClickListener { dbPicker.launch(arrayOf("application/octet-stream", "*/*")) }
         b.btnPdfFolder.setOnClickListener { treePicker.launch(null) }
         b.btnModel.setOnClickListener { modelPicker.launch(arrayOf("application/octet-stream", "*/*")) }
-        b.btnPfr.setOnClickListener { capture(PhotoMode.PFR) }
-        b.btnCaptain.setOnClickListener { capture(PhotoMode.CAPTAIN) }
-        b.btnComponent.setOnClickListener { capture(PhotoMode.COMPONENT) }
+        b.btnPfr.setOnClickListener { choosePhotoSource(PhotoMode.PFR) }
+        b.btnCaptain.setOnClickListener { choosePhotoSource(PhotoMode.CAPTAIN) }
+        b.btnComponent.setOnClickListener { choosePhotoSource(PhotoMode.COMPONENT) }
         b.btnRetrieve.setOnClickListener { retrieve(b.editQuery.text.toString(), "QUERY") }
         b.btnAnswer.setOnClickListener { answer() }
         b.btnConfirm.setOnClickListener { confirm() }
@@ -161,12 +171,18 @@ class V7MainActivity : AppCompatActivity() {
     private fun retrieve(raw: String, label: String) {
         val r = repo ?: return toast("Import database first")
         val q = raw.trim()
-        if (q.isBlank()) return
+        if (q.isBlank()) return toast("Enter a fault or technical question first")
         b.editQuery.setText(q)
         status("$label • searching approved evidence…")
         b.btnAnswer.isEnabled = false
         b.btnConfirm.visibility = View.GONE
         b.txtAnswer.visibility = View.GONE
+        b.txtAiHeading.visibility = View.GONE
+        b.txtEvidenceHeading.visibility = View.VISIBLE
+        b.txtAnalysis.visibility = View.VISIBLE
+        b.txtAnalysis.text = "Searching approved A340 technical evidence…"
+        b.listResults.visibility = View.GONE
+        scrollTo(b.txtEvidenceHeading)
         val profile = b.editAircraft.text.toString().trim()
         io.execute {
             runCatching { r.searchAi(q, profile) }.onSuccess { bundle ->
@@ -191,10 +207,21 @@ class V7MainActivity : AppCompatActivity() {
                     } else {
                         b.listResults.visibility = View.GONE
                         b.txtAiHeading.visibility = View.GONE
+                        b.txtAnalysis.append("\n\nNO APPROVED EVIDENCE RESULT — refine the query or check the technical source.")
                     }
                     status("$label • ${hits.size} approved evidence result(s)")
+                    scrollTo(b.txtEvidenceHeading)
                 }
-            }.onFailure { ui { status("Retrieval failed: ${it.message}") } }
+            }.onFailure { error ->
+                ui {
+                    b.txtEvidenceHeading.visibility = View.VISIBLE
+                    b.txtAnalysis.visibility = View.VISIBLE
+                    b.txtAnalysis.text = "RETRIEVAL ERROR\n${error.message ?: error.javaClass.simpleName}"
+                    b.listResults.visibility = View.GONE
+                    status("Retrieval failed • see error below")
+                    scrollTo(b.txtEvidenceHeading)
+                }
+            }
         }
     }
 
@@ -205,20 +232,63 @@ class V7MainActivity : AppCompatActivity() {
         val q = queryForLearning.ifBlank { b.editQuery.text.toString().trim() }
         b.txtAiHeading.visibility = View.VISIBLE
         b.txtAnswer.visibility = View.VISIBLE
-        b.txtAnswer.text = "Preparing approved evidence and running local inference…"
+        b.txtAnswer.text = "Starting Local AI on CPU…\nThe answer will appear here while it is generated."
+        b.btnAnswer.isEnabled = false
+        status("LOCAL AI • preparing evidence and loading model…")
+        scrollTo(b.txtAiHeading)
+
         io.execute {
             runCatching {
                 val model = models.installedModel() ?: error("Select a compatible .litertlm model first")
                 if (!llm.isLoaded()) llm.load(model)
                 val pack = er.buildEvidencePack(hits, r)
                 require(pack.isNotBlank()) { "No approved evidence could be assembled" }
-                llm.answer(q, pack, safety)
-            }.onSuccess { result ->
-                ui { b.txtAnswer.text = result; modelStatus() }
-            }.onFailure {
+                Triple(model, pack, q)
+            }.onSuccess { (_, pack, question) ->
+                val stream = StringBuilder()
                 ui {
-                    b.txtAnswer.text = "LOCAL AI UNAVAILABLE\n${it.message}\n\nRetrieved source results remain usable."
+                    b.txtAnswer.text = ""
+                    status("LOCAL AI • generating grounded answer…")
                     modelStatus()
+                }
+                llm.answerStreaming(
+                    question = question,
+                    evidencePack = pack,
+                    safetySummary = safety,
+                    onChunk = { chunk ->
+                        ui {
+                            stream.append(chunk)
+                            b.txtAnswer.text = stream.toString()
+                        }
+                    },
+                    onDone = {
+                        ui {
+                            if (stream.isBlank()) {
+                                b.txtAnswer.text = "LOCAL AI returned no text. Try the query again or use the retrieved evidence directly."
+                            }
+                            b.btnAnswer.isEnabled = true
+                            status("LOCAL AI • grounded answer ready")
+                            modelStatus()
+                            scrollTo(b.txtAiHeading)
+                        }
+                    },
+                    onError = { error ->
+                        ui {
+                            b.txtAnswer.text = "LOCAL AI ERROR\n${error.message ?: error.javaClass.simpleName}\n\nRetrieved source evidence remains usable."
+                            b.btnAnswer.isEnabled = true
+                            status("LOCAL AI failed • retrieved evidence remains available")
+                            modelStatus()
+                            scrollTo(b.txtAiHeading)
+                        }
+                    }
+                )
+            }.onFailure { error ->
+                ui {
+                    b.txtAnswer.text = "LOCAL AI ERROR\n${error.message ?: error.javaClass.simpleName}\n\nRetrieved source evidence remains usable."
+                    b.btnAnswer.isEnabled = true
+                    status("LOCAL AI failed • see error below")
+                    modelStatus()
+                    scrollTo(b.txtAiHeading)
                 }
             }
         }
@@ -231,6 +301,27 @@ class V7MainActivity : AppCompatActivity() {
         learning.confirm(q, h)
         b.txtAnalysis.append("\nLEARNED: ${h.manual} ${h.reference} confirmed for ranking only.")
         toast("Safe learning confirmation saved")
+    }
+
+    private fun choosePhotoSource(m: PhotoMode) {
+        mode = m
+        val title = when (m) {
+            PhotoMode.PFR -> "PFR image source"
+            PhotoMode.CAPTAIN -> "Tech Log image source"
+            PhotoMode.COMPONENT -> "Component image source"
+        }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setItems(arrayOf("CAMERA", "CHOOSE FROM PHONE / GALLERY")) { _, which ->
+                when (which) {
+                    0 -> capture(m)
+                    1 -> {
+                        mode = m
+                        galleryPicker.launch("image/*")
+                    }
+                }
+            }
+            .show()
     }
 
     private fun capture(m: PhotoMode) {
@@ -253,39 +344,60 @@ class V7MainActivity : AppCompatActivity() {
     private fun ocr(uri: Uri) {
         status("Reading image / OCR…")
         val rec = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-        rec.process(InputImage.fromFilePath(this, uri))
-            .addOnSuccessListener { t ->
-                val text = t.text
-                b.editQuery.setText(text)
-                when (mode) {
-                    PhotoMode.PFR -> {
-                        val a = PostFlightAnalyzer.analyze(text)
-                        cards = a.faults
-                        b.listCards.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, a.faults)
-                        showOcrCards("PFR • ${a.faults.size} fault(s) detected", a.faults.size)
-                        a.faults.firstOrNull()?.let { retrieve(augment(it.text, it.ata, it.identifiers), "PFR FAULT") }
-                    }
-                    PhotoMode.CAPTAIN -> {
-                        val a = CaptainReportAnalyzer.analyze(text)
-                        cards = a.defects
-                        b.listCards.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, a.defects)
-                        showOcrCards("TECH LOG • ${a.defects.size} defect(s) detected", a.defects.size)
-                        a.defects.firstOrNull()?.let { retrieve(augment(it.text, it.ata, it.identifiers), "CREW DEFECT") }
-                    }
-                    PhotoMode.COMPONENT -> {
-                        val a = ComponentAnalyzer.analyze(text)
-                        cards = emptyList()
-                        b.listCards.adapter = null
-                        b.listCards.visibility = View.GONE
-                        b.txtCards.visibility = View.GONE
-                        val q = listOf(a.rawText, a.identifiers.joinToString(" "), "PART NUMBER FIN CONNECTOR COMPONENT")
-                            .filter { it.isNotBlank() }.joinToString(" ")
-                        retrieve(q, "COMPONENT PHOTO")
-                    }
-                }
+        runCatching { InputImage.fromFilePath(this, uri) }
+            .onFailure {
+                status("Cannot open selected image: ${it.message}")
+                rec.close()
             }
-            .addOnFailureListener { status("OCR failed: ${it.message}") }
-            .addOnCompleteListener { rec.close() }
+            .onSuccess { image ->
+                rec.process(image)
+                    .addOnSuccessListener { t ->
+                        val text = t.text.trim()
+                        if (text.isBlank()) {
+                            b.editQuery.setText("")
+                            showOcrCards("OCR • no readable text detected", 0)
+                            status("OCR completed • no readable text found")
+                            return@addOnSuccessListener
+                        }
+                        b.editQuery.setText(text)
+                        when (mode) {
+                            PhotoMode.PFR -> {
+                                val a = PostFlightAnalyzer.analyze(text)
+                                cards = a.faults
+                                b.listCards.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, a.faults)
+                                showOcrCards("PFR • ${a.faults.size} fault(s) detected", a.faults.size)
+                                if (a.faults.isNotEmpty()) {
+                                    a.faults.firstOrNull()?.let { retrieve(augment(it.text, it.ata, it.identifiers), "PFR FAULT") }
+                                } else {
+                                    retrieve(text, "PFR OCR")
+                                }
+                            }
+                            PhotoMode.CAPTAIN -> {
+                                val a = CaptainReportAnalyzer.analyze(text)
+                                cards = a.defects
+                                b.listCards.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, a.defects)
+                                showOcrCards("TECH LOG • ${a.defects.size} defect(s) detected", a.defects.size)
+                                if (a.defects.isNotEmpty()) {
+                                    a.defects.firstOrNull()?.let { retrieve(augment(it.text, it.ata, it.identifiers), "CREW DEFECT") }
+                                } else {
+                                    retrieve(text, "TECH LOG OCR")
+                                }
+                            }
+                            PhotoMode.COMPONENT -> {
+                                val a = ComponentAnalyzer.analyze(text)
+                                cards = emptyList()
+                                b.listCards.adapter = null
+                                b.listCards.visibility = View.GONE
+                                b.txtCards.visibility = View.GONE
+                                val q = listOf(a.rawText, a.identifiers.joinToString(" "), "PART NUMBER FIN CONNECTOR COMPONENT")
+                                    .filter { it.isNotBlank() }.joinToString(" ")
+                                retrieve(q, "COMPONENT PHOTO")
+                            }
+                        }
+                    }
+                    .addOnFailureListener { status("OCR failed: ${it.message}") }
+                    .addOnCompleteListener { rec.close() }
+            }
     }
 
     private fun showOcrCards(label: String, count: Int) {
@@ -297,6 +409,7 @@ class V7MainActivity : AppCompatActivity() {
         } else {
             b.listCards.visibility = View.GONE
         }
+        scrollTo(b.txtCards)
     }
 
     private fun cardClicked(p: Int) {
@@ -339,6 +452,13 @@ class V7MainActivity : AppCompatActivity() {
         val px = (rowDp * resources.displayMetrics.density).toInt()
         list.layoutParams = list.layoutParams.apply { height = rows * px }
         list.requestLayout()
+    }
+
+    private fun scrollTo(view: View) {
+        view.post {
+            val rect = Rect(0, 0, view.width.coerceAtLeast(1), view.height.coerceAtLeast(1))
+            view.requestRectangleOnScreen(rect, true)
+        }
     }
 
     private fun status(s: String) { b.txtStatus.text = s }
