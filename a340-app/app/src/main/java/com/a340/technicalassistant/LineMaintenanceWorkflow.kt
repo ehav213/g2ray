@@ -25,9 +25,10 @@ data class LineMaintenanceResult(
  * Line-maintenance retrieval sequence:
  * MEL -> TSM -> AMM -> ASM -> AWM -> IPC -> ESPM (only for wiring/ESPM intent).
  *
- * Dispatch classification is deliberately conservative. GO/NO-GO is emitted only
- * when explicit wording is found in a MEL candidate whose effectivity matches the
- * supplied aircraft profile. Otherwise the original MEL entry must be verified.
+ * MEL matching is intentionally stricter than the general technical search. The
+ * reported fault wording does not need to be identical to the MEL wording, but a
+ * MEL candidate must match the affected system/item and, when detectable, the ATA.
+ * Generic single-word overlap is not accepted as a valid dispatch match.
  */
 class LineMaintenanceWorkflow(
     dbFile: File,
@@ -40,7 +41,7 @@ class LineMaintenanceWorkflow(
         val base = resolver.searchAi(query, aircraftProfile, limit = 120)
         val includeEspm = needsEspm(query, analysis)
 
-        val mel = stageHits("MEL", query, aircraftProfile, 4, base.hits)
+        val mel = melStageHits(query, aircraftProfile, analysis, base.hits, 4)
         val tsm = stageHits("TSM", query, aircraftProfile, 6, base.hits)
         val amm = stageHits("AMM", query, aircraftProfile, 4, base.hits)
         val asm = stageHits("ASM", query, aircraftProfile, 3, base.hits)
@@ -48,7 +49,7 @@ class LineMaintenanceWorkflow(
         val ipc = stageHits("IPC", query, aircraftProfile, 3, base.hits)
         val espm = if (includeEspm) stageHits("ESPM", query, aircraftProfile, 3, base.hits) else emptyList()
 
-        val dispatch = classifyMel(mel, aircraftProfile)
+        val dispatch = classifyMel(mel, aircraftProfile, query, analysis)
         val packet = linkedSetOf<String>()
         val ordered = mutableListOf<SearchHit>()
 
@@ -94,6 +95,107 @@ class LineMaintenanceWorkflow(
             includeEspm = includeEspm,
             graphLinksAdded = base.graphLinksAdded
         )
+    }
+
+    /**
+     * MEL is not searched like the other manuals. We first retrieve candidates,
+     * then reject results that do not match the fault's core equipment/system.
+     * Example: "APU AUTO SHUTDOWN" may legitimately map to an MEL item named
+     * "APU" rather than the exact fault phrase, but an unrelated ATA/item must not.
+     */
+    private fun melStageHits(
+        query: String,
+        profile: String,
+        analysis: QueryIntelligence.Analysis,
+        baseHits: List<SearchHit>,
+        limit: Int
+    ): List<SearchHit> {
+        val direct = searchManual("MEL", query, 80)
+        val fallback = baseHits.filter { it.manual.equals("MEL", ignoreCase = true) }
+        val merged = mutableListOf<SearchHit>()
+        val seen = linkedSetOf<String>()
+        (direct + fallback).forEach { h ->
+            val key = "${h.entityType}|${h.entityId}|${h.manual}|${h.reference}"
+            if (seen.add(key)) merged += h
+        }
+
+        val core = melCoreTerms(query, analysis)
+        return merged
+            .map { it to melRelevanceScore(it, query, analysis, core) }
+            .filter { (_, score) -> score < 1000 }
+            .sortedWith(
+                compareBy<Pair<SearchHit, Int>> { it.second }
+                    .thenBy { effectivityPenalty(it.first, profile) }
+                    .thenBy { it.first.score }
+            )
+            .map { it.first }
+            .take(limit)
+    }
+
+    private fun melCoreTerms(query: String, analysis: QueryIntelligence.Analysis): List<String> {
+        val generic = setOf(
+            "AUTO", "AUTOMATIC", "FAULT", "FAIL", "FAILED", "FAILURE", "WARNING", "CAUTION",
+            "MESSAGE", "ECAM", "PFR", "REPORT", "TECH", "LOG", "INOP", "INOPERATIVE",
+            "SHUTDOWN", "SHUT", "DOWN", "TRIP", "RESET", "ATA", "SYSTEM"
+        )
+        val raw = Regex("[A-Z0-9][A-Z0-9_./-]*")
+            .findAll(query.uppercase())
+            .map { it.value }
+            .filter { it.length >= 2 && it !in generic && !it.matches(Regex("\\d{2}")) }
+            .distinct()
+            .toMutableList()
+
+        // Keep known system identifiers even when the fault text is otherwise generic.
+        if (query.uppercase().contains("APU") && "APU" !in raw) raw += "APU"
+        if (analysis.ata == "49" && raw.isEmpty()) raw += "APU"
+        return raw.take(8)
+    }
+
+    private fun melRelevanceScore(
+        hit: SearchHit,
+        query: String,
+        analysis: QueryIntelligence.Analysis,
+        coreTerms: List<String>
+    ): Int {
+        val resolved = runCatching { resolver.resolve(hit) }.getOrNull()
+        val hay = listOf(hit.reference, hit.title, hit.snippet, resolved?.content.orEmpty())
+            .joinToString(" ")
+            .uppercase()
+            .replace(Regex("\\s+"), " ")
+
+        val normalizedQuery = query.uppercase().replace(Regex("\\s+"), " ").trim()
+        val exactPhrase = normalizedQuery.length >= 6 && hay.contains(normalizedQuery)
+
+        // If ATA can be determined, reject an explicit different ATA result.
+        val ata = analysis.ata
+        if (!ata.isNullOrBlank()) {
+            val explicitAta = Regex("(?:ATA\\s*)?(\\d{2})[- ./]").find(hay)?.groupValues?.getOrNull(1)
+            if (explicitAta != null && explicitAta != ata) return 1000
+        }
+
+        if (coreTerms.isNotEmpty()) {
+            val matched = coreTerms.count { term -> containsWholeTerm(hay, term) }
+            if (matched == 0) return 1000
+            // For multi-item queries, require at least half of the core terms.
+            val required = if (coreTerms.size <= 2) 1 else (coreTerms.size + 1) / 2
+            if (matched < required) return 1000
+
+            var score = (coreTerms.size - matched) * 20
+            if (exactPhrase) score -= 100
+            // Prefer a compact MEL item title such as "APU" over a loosely related
+            // compound item such as "APU BLEED ..." when the fault only identifies APU.
+            val titleWords = Regex("[A-Z0-9][A-Z0-9_./-]*").findAll(hit.title.uppercase()).count()
+            score += titleWords.coerceAtMost(20)
+            return score
+        }
+
+        // With no reliable core equipment term, do not accept MEL as a dispatch match.
+        return if (exactPhrase) 0 else 1000
+    }
+
+    private fun containsWholeTerm(text: String, term: String): Boolean {
+        val p = "(^|[^A-Z0-9])${Regex.escape(term.uppercase())}([^A-Z0-9]|$)"
+        return Regex(p).containsMatchIn(text)
     }
 
     private fun stageHits(
@@ -146,14 +248,22 @@ class LineMaintenanceWorkflow(
         return out
     }
 
-    private fun classifyMel(melHits: List<SearchHit>, profile: String): MelDispatchStatus {
+    private fun classifyMel(
+        melHits: List<SearchHit>,
+        profile: String,
+        query: String,
+        analysis: QueryIntelligence.Analysis
+    ): MelDispatchStatus {
         if (melHits.isEmpty()) return MelDispatchStatus.NO_MATCH
         if (profile.isBlank()) return MelDispatchStatus.VERIFY_REQUIRED
 
-        val effectivityMatched = melHits.filter { effectivityPenalty(it, profile) == 0 }
-        if (effectivityMatched.isEmpty()) return MelDispatchStatus.VERIFY_REQUIRED
+        val core = melCoreTerms(query, analysis)
+        val eligible = melHits.filter {
+            effectivityPenalty(it, profile) == 0 && melRelevanceScore(it, query, analysis, core) < 1000
+        }
+        if (eligible.isEmpty()) return MelDispatchStatus.VERIFY_REQUIRED
 
-        val text = effectivityMatched.take(3).joinToString("\n") { hit ->
+        val text = eligible.take(3).joinToString("\n") { hit ->
             val source = runCatching { resolver.resolve(hit) }.getOrNull()
             listOf(hit.title, hit.snippet, source?.content.orEmpty()).joinToString(" ")
         }.uppercase()
@@ -222,13 +332,14 @@ class LineMaintenanceWorkflow(
         append("LINE MAINTENANCE WORKFLOW")
         if (!analysis.ata.isNullOrBlank()) append(" • ATA ").append(analysis.ata)
         append("\n\n1 — MEL FIRST")
+        append("\nMEL matching uses affected system/item + ATA relevance; MEL wording does not have to be identical to the PFR/TSM fault wording.")
         when (dispatch) {
-            MelDispatchStatus.GO_EXPLICIT -> append("\nMEL DISPATCH: GO wording detected in an effectivity-matched MEL candidate — only if every MEL condition, (M)/(O) procedure and limitation is satisfied. Open the original MEL source below.")
-            MelDispatchStatus.NO_GO_EXPLICIT -> append("\nMEL DISPATCH: NO-GO / operative requirement wording detected in an effectivity-matched MEL candidate. Open the original MEL source below before any dispatch decision.")
-            MelDispatchStatus.VERIFY_REQUIRED -> append("\nMEL CHECK REQUIRES ORIGINAL SOURCE VERIFICATION — either aircraft effectivity/MSN is missing, no effectivity-matched MEL candidate was confirmed, or GO/NO-GO wording is not explicit. AI must not infer dispatch permission.")
-            MelDispatchStatus.NO_MATCH -> append("\nNO DIRECT MEL MATCH FOUND in the indexed MEL. This does NOT mean GO. Verify MEL applicability before dispatch.")
+            MelDispatchStatus.GO_EXPLICIT -> append("\nMEL DISPATCH: GO wording detected in a relevance- and effectivity-matched MEL candidate — only if every MEL condition, (M)/(O) procedure and limitation is satisfied. Open the original MEL source below.")
+            MelDispatchStatus.NO_GO_EXPLICIT -> append("\nMEL DISPATCH: NO-GO / operative requirement wording detected in a relevance- and effectivity-matched MEL candidate. Open the original MEL source below before any dispatch decision.")
+            MelDispatchStatus.VERIFY_REQUIRED -> append("\nMEL CHECK REQUIRES ORIGINAL SOURCE VERIFICATION — effectivity may be missing/unmatched or the candidate is not strong enough for an automatic dispatch decision. AI must not infer dispatch permission.")
+            MelDispatchStatus.NO_MATCH -> append("\nNO RELEVANT MEL ITEM MATCHED THE REPORTED FAULT/SYSTEM. This does NOT mean GO. Verify MEL applicability before dispatch.")
         }
-        append("\nMEL sources: ").append(mel.size)
+        append("\nRelevant MEL sources: ").append(mel.size)
 
         append("\n\n2 — TSM FAULT ISOLATION\nRelevant TSM sources: ").append(tsm.size)
         append("\n3 — AMM MAINTENANCE TASKS\nRelevant AMM sources: ").append(amm.size)
