@@ -1,6 +1,7 @@
 package com.a340.technicalassistant
 
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.pdf.PdfRenderer
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
@@ -25,13 +26,21 @@ class PdfPageActivity : AppCompatActivity() {
         val index = (requested - 1).coerceIn(0, renderer!!.pageCount - 1)
         page = renderer!!.openPage(index)
         val scale = 1.5f
-        val bmp = Bitmap.createBitmap((page!!.width*scale).toInt(), (page!!.height*scale).toInt(), Bitmap.Config.ARGB_8888)
+        val bmp = Bitmap.createBitmap(
+            (page!!.width * scale).toInt(),
+            (page!!.height * scale).toInt(),
+            Bitmap.Config.ARGB_8888
+        )
+        bmp.eraseColor(Color.WHITE)
         page!!.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+        b.pdfImage.setBackgroundColor(Color.WHITE)
         b.pdfImage.setImageBitmap(bmp)
-        b.txtPdfTitle.append(" • PDF page ${index+1}/${renderer!!.pageCount}")
+        b.txtPdfTitle.append(" • PDF file page ${index + 1}/${renderer!!.pageCount}")
     }
 
     override fun onDestroy() {
-        page?.close(); renderer?.close(); super.onDestroy()
+        page?.close()
+        renderer?.close()
+        super.onDestroy()
     }
 }
