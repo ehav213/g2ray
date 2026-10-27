@@ -1,146 +1,386 @@
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:background="#0B0F14"
+    android:fillViewport="true"
+    android:clipToPadding="false">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="16dp">
+        android:paddingStart="16dp"
+        android:paddingTop="18dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="28dp">
 
         <TextView
-            android:id="@+id/txtStatus"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Import A340 Technical Master v5 database"
-            android:textStyle="bold" />
-
-        <Button
-            android:id="@+id/btnImportDb"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="IMPORT / UPDATE DATABASE" />
-
-        <Button
-            android:id="@+id/btnPdfFolder"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="SELECT PDF ROOT FOLDER" />
-
-        <Button
-            android:id="@+id/btnModel"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="SELECT / IMPORT LOCAL LLM MODEL (.litertlm)" />
+            android:text="A340 TECHNICAL ASSISTANT"
+            android:textColor="#F4F7FB"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.03" />
 
         <TextView
-            android:id="@+id/txtModel"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:paddingTop="6dp"
-            android:paddingBottom="8dp"
-            android:text="No local LLM model installed. Retrieval works without a model."
-            android:textIsSelectable="true" />
+            android:layout_marginTop="3dp"
+            android:text="OFFLINE MAINTENANCE KNOWLEDGE SYSTEM"
+            android:textColor="#7F8FA6"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.08" />
 
-        <Button
-            android:id="@+id/btnPfr"
+        <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="PHOTO POST FLIGHT → GROUNDED AI" />
+            android:layout_marginTop="14dp"
+            app:cardBackgroundColor="#111821"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="0dp"
+            app:strokeColor="#263445"
+            app:strokeWidth="1dp">
 
-        <Button
-            android:id="@+id/btnCaptain"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="PHOTO CAPTAIN / TECH LOG → GROUNDED AI" />
+            <TextView
+                android:id="@+id/txtStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingStart="14dp"
+                android:paddingTop="11dp"
+                android:paddingEnd="14dp"
+                android:paddingBottom="11dp"
+                android:text="Checking technical library…"
+                android:textColor="#B9C8D8"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:textIsSelectable="true" />
+        </com.google.android.material.card.MaterialCardView>
 
-        <Button
-            android:id="@+id/btnComponent"
+        <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="PHOTO COMPONENT → AI ID SEARCH" />
+            android:layout_marginTop="22dp"
+            android:text="AIRCRAFT &amp; TECHNICAL QUERY"
+            android:textColor="#8EA2BA"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.08" />
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            app:cardBackgroundColor="#111821"
+            app:cardCornerRadius="14dp"
+            app:cardElevation="0dp"
+            app:strokeColor="#263445"
+            app:strokeWidth="1dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <EditText
+                    android:id="@+id/editAircraft"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:backgroundTint="#50647A"
+                    android:hint="Aircraft profile — REG / MSN / effectivity"
+                    android:singleLine="true"
+                    android:textColor="#F4F7FB"
+                    android:textColorHint="#70839A"
+                    android:textSize="14sp" />
+
+                <EditText
+                    android:id="@+id/editQuery"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:backgroundTint="#50647A"
+                    android:gravity="top|start"
+                    android:hint="Fault / ECAM / ATA / FIN / P/N / technical question"
+                    android:minHeight="92dp"
+                    android:minLines="3"
+                    android:paddingTop="12dp"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#70839A"
+                    android:textSize="16sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnRetrieve"
+                    android:layout_width="match_parent"
+                    android:layout_height="52dp"
+                    android:layout_marginTop="14dp"
+                    android:text="SEARCH APPROVED MANUAL EVIDENCE"
+                    android:textAllCaps="true"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    app:backgroundTint="#2463B5"
+                    app:cornerRadius="10dp" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="PHOTO INPUT"
+            android:textColor="#8EA2BA"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.08" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal"
+            android:weightSum="3">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnPfr"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="54dp"
+                android:layout_marginEnd="5dp"
+                android:layout_weight="1"
+                android:text="PFR"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                app:cornerRadius="9dp"
+                app:strokeColor="#3D5876" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnCaptain"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="54dp"
+                android:layout_marginStart="3dp"
+                android:layout_marginEnd="3dp"
+                android:layout_weight="1"
+                android:text="TECH LOG"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                app:cornerRadius="9dp"
+                app:strokeColor="#3D5876" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnComponent"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="54dp"
+                android:layout_marginStart="5dp"
+                android:layout_weight="1"
+                android:text="COMPONENT"
+                android:textSize="10sp"
+                android:textStyle="bold"
+                app:cornerRadius="9dp"
+                app:strokeColor="#3D5876" />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/txtCards"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:paddingTop="8dp"
-            android:paddingBottom="4dp"
-            android:text="PFR / Crew defect cards will appear here after OCR."
-            android:textStyle="bold" />
+            android:layout_marginTop="14dp"
+            android:text="OCR DEFECTS"
+            android:textColor="#D4DFEB"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
 
         <ListView
             android:id="@+id/listCards"
             android:layout_width="match_parent"
-            android:layout_height="220dp"
-            android:dividerHeight="1dp" />
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:background="#111821"
+            android:divider="#263445"
+            android:dividerHeight="1dp"
+            android:nestedScrollingEnabled="false"
+            android:visibility="gone" />
 
-        <EditText
-            android:id="@+id/editAircraft"
+        <TextView
+            android:id="@+id/txtEvidenceHeading"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Aircraft profile: REG / MSN / customer / effectivity"
-            android:singleLine="true" />
-
-        <EditText
-            android:id="@+id/editQuery"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="Fault / question / ATA / FIN / P/N — Persian or English"
-            android:minLines="2" />
-
-        <Button
-            android:id="@+id/btnRetrieve"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="1 — GROUNDED RETRIEVAL / EVIDENCE" />
-
-        <Button
-            android:id="@+id/btnAnswer"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="2 — ASK LOCAL LLM — GROUNDED ANSWER" />
-
-        <Button
-            android:id="@+id/btnConfirm"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="CONFIRM LAST OPENED RESULT → SAFE LEARNING" />
+            android:layout_marginTop="22dp"
+            android:text="APPROVED EVIDENCE"
+            android:textColor="#8EA2BA"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.08"
+            android:visibility="gone" />
 
         <TextView
             android:id="@+id/txtAnalysis"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:paddingTop="8dp"
-            android:paddingBottom="8dp"
-            android:text="Retrieval analysis, revision/effectivity warnings and learning status appear here."
-            android:textIsSelectable="true" />
+            android:layout_marginTop="8dp"
+            android:background="#111821"
+            android:padding="14dp"
+            android:textColor="#AFC0D2"
+            android:textIsSelectable="true"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <ListView
+            android:id="@+id/listResults"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="#111821"
+            android:divider="#263445"
+            android:dividerHeight="1dp"
+            android:nestedScrollingEnabled="false"
+            android:visibility="gone" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnConfirm"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="8dp"
+            android:text="CONFIRM OPENED RESULT FOR SAFE LEARNING"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:visibility="gone"
+            app:cornerRadius="9dp"
+            app:strokeColor="#3D5876" />
+
+        <TextView
+            android:id="@+id/txtAiHeading"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="22dp"
+            android:text="LOCAL AI ANALYSIS"
+            android:textColor="#8EA2BA"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.08"
+            android:visibility="gone" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnAnswer"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:layout_marginTop="8dp"
+            android:enabled="false"
+            android:text="GENERATE GROUNDED AI ANSWER"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            app:backgroundTint="#1C806F"
+            app:cornerRadius="10dp" />
 
         <TextView
             android:id="@+id/txtAnswer"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="#111821"
             android:minHeight="100dp"
-            android:padding="10dp"
-            android:text="Local LLM answer will appear here. It is generated only from retrieved evidence."
-            android:textIsSelectable="true" />
+            android:padding="14dp"
+            android:textColor="#E7EEF6"
+            android:textIsSelectable="true"
+            android:textSize="14sp"
+            android:visibility="gone" />
 
         <TextView
-            android:id="@+id/txtManuals"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:paddingTop="8dp" />
+            android:layout_marginTop="24dp"
+            android:text="TECHNICAL LIBRARY"
+            android:textColor="#8EA2BA"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.08" />
 
-        <ListView
-            android:id="@+id/listResults"
+        <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
-            android:layout_height="620dp"
-            android:dividerHeight="1dp" />
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            app:cardBackgroundColor="#111821"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="0dp"
+            app:strokeColor="#263445"
+            app:strokeWidth="1dp">
+
+            <TextView
+                android:id="@+id/txtManuals"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:padding="14dp"
+                android:text="No technical library loaded"
+                android:textColor="#9FB1C4"
+                android:textIsSelectable="true"
+                android:textSize="12sp" />
+        </com.google.android.material.card.MaterialCardView>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="SETUP &amp; DATA"
+            android:textColor="#8EA2BA"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.08" />
+
+        <TextView
+            android:id="@+id/txtModel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="#111821"
+            android:padding="12dp"
+            android:text="No local LLM model installed"
+            android:textColor="#9FB1C4"
+            android:textIsSelectable="true"
+            android:textSize="12sp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnImportDb"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:layout_marginTop="8dp"
+            android:text="IMPORT / UPDATE DATABASE"
+            android:textSize="11sp"
+            app:cornerRadius="8dp"
+            app:strokeColor="#344A63" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnPdfFolder"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:layout_marginTop="5dp"
+            android:text="SELECT PDF ROOT FOLDER"
+            android:textSize="11sp"
+            app:cornerRadius="8dp"
+            app:strokeColor="#344A63" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnModel"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:layout_marginTop="5dp"
+            android:text="IMPORT LOCAL AI MODEL (.LITERTLM)"
+            android:textSize="11sp"
+            app:cornerRadius="8dp"
+            app:strokeColor="#344A63" />
 
         <Button
             android:id="@+id/btnLegacy"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="OPEN V6 RETRIEVAL SCREEN" />
+            android:layout_width="1dp"
+            android:layout_height="1dp"
+            android:visibility="gone" />
+
     </LinearLayout>
-</ScrollView>
+</androidx.core.widget.NestedScrollView>
