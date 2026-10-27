@@ -6,6 +6,8 @@ import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.Message
+import com.google.ai.edge.litertlm.MessageCallback
 import java.io.File
 
 class LocalLlmEngine(private val context: Context) : AutoCloseable {
@@ -37,7 +39,14 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
         }
     }
 
-    fun answer(question: String, evidencePack: String, safetySummary: String): String {
+    fun answerStreaming(
+        question: String,
+        evidencePack: String,
+        safetySummary: String,
+        onChunk: (String) -> Unit,
+        onDone: () -> Unit,
+        onError: (Throwable) -> Unit
+    ) {
         val active = engine ?: error("Load a local .litertlm model first")
         require(evidencePack.isNotBlank()) { "No approved evidence available for grounded answer" }
 
@@ -71,10 +80,34 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
             Produce a concise grounded answer now.
         """.trimIndent()
 
-        active.createConversation(
+        val conversation = active.createConversation(
             ConversationConfig(systemInstruction = systemInstruction)
-        ).use { conversation ->
-            return conversation.sendMessage(prompt).toString().trim()
+        )
+
+        try {
+            conversation.sendMessageAsync(
+                prompt,
+                object : MessageCallback {
+                    override fun onMessage(message: Message) {
+                        val text = message.toString()
+                        if (text.isNotBlank()) onChunk(text)
+                    }
+
+                    override fun onDone() {
+                        runCatching { conversation.close() }
+                        onDone()
+                    }
+
+                    override fun onError(throwable: Throwable) {
+                        runCatching { conversation.close() }
+                        onError(throwable)
+                    }
+                },
+                maxOutputToken = 384
+            )
+        } catch (t: Throwable) {
+            runCatching { conversation.close() }
+            onError(t)
         }
     }
 
