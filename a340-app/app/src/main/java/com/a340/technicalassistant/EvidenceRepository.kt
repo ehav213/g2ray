@@ -9,8 +9,8 @@ class EvidenceRepository(dbFile: File) : AutoCloseable {
     fun buildEvidencePack(
         hits: List<SearchHit>,
         resolver: SearchRepository,
-        maxItems: Int = 5,
-        maxCharsPerItem: Int = 950
+        maxItems: Int = 3,
+        maxCharsPerItem: Int = 480
     ): String {
         val blocks = mutableListOf<String>()
         hits.take(maxItems).forEachIndexed { index, hit ->
@@ -25,8 +25,8 @@ class EvidenceRepository(dbFile: File) : AutoCloseable {
                 append("[E").append(index + 1).append("] ")
                 append(hit.manual)
                 if (hit.reference.isNotBlank()) append(" | ").append(hit.reference)
-                if (hit.title.isNotBlank()) append(" | ").append(hit.title)
-                if (src != null) append(" | ").append(src.filename).append(" | PDF page ").append(src.pdfPage)
+                if (hit.title.isNotBlank()) append(" | ").append(hit.title.take(140))
+                if (src != null) append(" | PDF ").append(src.pdfPage)
                 if (hit.manual == "ESPM") append(" | INFORMATION ONLY")
             }
             blocks += "$header\n$body"
@@ -62,7 +62,7 @@ class EvidenceRepository(dbFile: File) : AutoCloseable {
             SELECT content FROM chunks
             WHERE document_id=? AND pdf_page BETWEEN ? AND ?
             ORDER BY pdf_page,chunk_index
-            LIMIT 10
+            LIMIT 6
             """.trimIndent(),
             arrayOf(meta.documentId.toString(), meta.startPage.toString(), endPage.toString())
         ).use { c ->
