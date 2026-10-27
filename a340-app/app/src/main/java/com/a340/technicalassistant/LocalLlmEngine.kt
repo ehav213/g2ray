@@ -25,7 +25,7 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
         val cache = File(context.cacheDir, "litertlm_cache").apply { mkdirs() }
         val config = EngineConfig(
             modelPath = modelFile.absolutePath,
-            backend = Backend.CPU(),
+            backend = Backend.CPU(threadCount = 4),
             cacheDir = cache.absolutePath
         )
         val candidate = Engine(config)
@@ -53,12 +53,15 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
         val systemInstruction = Contents.of(
             """
             You are an A340 grounded maintenance assistant.
-            Use ONLY EVIDENCE. Do not invent procedures, limits, values, part numbers, effectivity or dispatch permission.
+            Use ONLY EVIDENCE. Never invent procedures, values, limits, part numbers, effectivity or dispatch permission.
             Cite [E1], [E2] or [E3] after technical statements.
-            If evidence is insufficient, write: INSUFFICIENT APPROVED DATA — CHECK SOURCE MANUAL.
+            If evidence is insufficient, write exactly: INSUFFICIENT APPROVED DATA — CHECK SOURCE MANUAL.
             ESPM INFORMATION ONLY is not a primary maintenance reference.
-            Answer in the user's language; keep aircraft technical terms in English.
-            Format briefly: Finding; Evidence; Next Reference.
+            Answer in the user's language and keep aircraft technical terms in English.
+            Output exactly three short sections on separate lines:
+            Finding:
+            Evidence:
+            Next Reference:
             """.trimIndent()
         )
 
@@ -67,12 +70,13 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
             SAFETY: $safetySummary
             EVIDENCE:
             $evidencePack
-            Give a short grounded answer.
+            Give only a short grounded answer.
         """.trimIndent()
 
         val conversation = active.createConversation(
             ConversationConfig(systemInstruction = systemInstruction)
         )
+        val accumulated = StringBuilder()
 
         try {
             conversation.sendMessageAsync(
@@ -80,7 +84,19 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
                 object : MessageCallback {
                     override fun onMessage(message: Message) {
                         val text = message.toString()
-                        if (text.isNotBlank()) onChunk(text)
+                        if (text.isBlank()) return
+                        synchronized(accumulated) {
+                            val previous = accumulated.toString()
+                            when {
+                                previous.isNotEmpty() && text.startsWith(previous) -> {
+                                    accumulated.setLength(0)
+                                    accumulated.append(text)
+                                }
+                                previous.endsWith(text) -> Unit
+                                else -> accumulated.append(text)
+                            }
+                            onChunk(accumulated.toString())
+                        }
                     }
 
                     override fun onDone() {
@@ -93,7 +109,7 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
                         onError(throwable)
                     }
                 },
-                maxOutputToken = 192
+                maxOutputToken = 96
             )
         } catch (t: Throwable) {
             runCatching { conversation.close() }
