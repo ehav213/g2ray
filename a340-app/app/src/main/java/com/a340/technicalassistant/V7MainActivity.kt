@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -40,7 +41,9 @@ class V7MainActivity : AppCompatActivity() {
         val btnRetrieve: Button = a.findViewById(R.id.btnRetrieve)
         val btnAnswer: Button = a.findViewById(R.id.btnAnswer)
         val btnConfirm: Button = a.findViewById(R.id.btnConfirm)
+        val txtEvidenceHeading: TextView = a.findViewById(R.id.txtEvidenceHeading)
         val txtAnalysis: TextView = a.findViewById(R.id.txtAnalysis)
+        val txtAiHeading: TextView = a.findViewById(R.id.txtAiHeading)
         val txtAnswer: TextView = a.findViewById(R.id.txtAnswer)
         val txtManuals: TextView = a.findViewById(R.id.txtManuals)
         val listResults: ListView = a.findViewById(R.id.listResults)
@@ -72,7 +75,7 @@ class V7MainActivity : AppCompatActivity() {
         status("Indexing PDF folder…")
         io.execute {
             val n = pdfs.rebuild(this, uri)
-            ui { status("PDF index ready: $n files") }
+            ui { status("PDF LIBRARY READY • $n files indexed") }
         }
     }
     private val takePhoto = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
@@ -105,14 +108,19 @@ class V7MainActivity : AppCompatActivity() {
 
     private fun openDb() {
         val f = dbm.databaseFile()
-        if (!f.exists()) return status("Import A340 Technical Master v5 database")
+        if (!f.exists()) return status("SETUP REQUIRED • Import A340 Technical Master database")
         runCatching {
             repo?.close(); evidence?.close()
             repo = SearchRepository(f); evidence = EvidenceRepository(f)
             val ms = repo!!.manuals()
-            status("A340 Master v${repo!!.architectureVersion()} • V7 Local LLM • ${ms.count { it.status == "INTEGRATED" }} manuals")
-            b.txtManuals.text = ms.joinToString("\n") {
-                "${it.code}: ${it.status} • ${it.pages} pages" + if (it.code == "ESPM") " • INFO ONLY" else ""
+            val integrated = ms.count { it.status == "INTEGRATED" }
+            status("DATABASE READY • A340 Master v${repo!!.architectureVersion()} • $integrated manuals • OFFLINE")
+            b.txtManuals.text = buildString {
+                append("$integrated manuals ready")
+                ms.forEach {
+                    append("\n").append(it.code).append("  •  ").append(it.pages).append(" pages")
+                    if (it.code == "ESPM") append("  •  INFO ONLY")
+                }
             }
         }.onFailure { status("Database open failed: ${it.message}") }
     }
@@ -121,7 +129,7 @@ class V7MainActivity : AppCompatActivity() {
         status("Copying database…")
         io.execute {
             runCatching {
-                dbm.importDatabase(uri) { bytes -> ui { status("Copying DB: ${bytes / 1048576} MB") } }
+                dbm.importDatabase(uri) { bytes -> ui { status("IMPORTING DATABASE • ${bytes / 1048576} MB") } }
             }.onSuccess { ui { openDb() } }
                 .onFailure { ui { status("Database import failed: ${it.message}") } }
         }
@@ -131,7 +139,7 @@ class V7MainActivity : AppCompatActivity() {
         b.txtModel.text = "Importing local model…"
         io.execute {
             runCatching {
-                models.importModel(uri) { bytes -> ui { b.txtModel.text = "Importing model: ${bytes / 1048576} MB" } }
+                models.importModel(uri) { bytes -> ui { b.txtModel.text = "Importing model • ${bytes / 1048576} MB" } }
             }.onSuccess { f ->
                 ui { b.txtModel.text = "Model installed: ${f.name} • loading…" }
                 runCatching { llm.load(f) }
@@ -144,9 +152,9 @@ class V7MainActivity : AppCompatActivity() {
     private fun modelStatus() {
         val f = models.installedModel()
         b.txtModel.text = when {
-            llm.isLoaded() -> "LOCAL LLM READY • ${llm.loadedModelName()} • CPU • OFFLINE"
-            f != null -> "Model installed: ${f.name} • ${f.length() / 1048576} MB • loads on ASK"
-            else -> "No .litertlm model installed. Retrieval works without a model."
+            llm.isLoaded() -> "LOCAL AI READY • ${llm.loadedModelName()} • CPU • OFFLINE"
+            f != null -> "LOCAL AI INSTALLED • ${f.name} • ${f.length() / 1048576} MB • loads on demand"
+            else -> "LOCAL AI MODEL NOT INSTALLED • Retrieval remains available"
         }
     }
 
@@ -155,7 +163,10 @@ class V7MainActivity : AppCompatActivity() {
         val q = raw.trim()
         if (q.isBlank()) return
         b.editQuery.setText(q)
-        status("$label • grounded retrieval…")
+        status("$label • searching approved evidence…")
+        b.btnAnswer.isEnabled = false
+        b.btnConfirm.visibility = View.GONE
+        b.txtAnswer.visibility = View.GONE
         val profile = b.editAircraft.text.toString().trim()
         io.execute {
             runCatching { r.searchAi(q, profile) }.onSuccess { bundle ->
@@ -170,7 +181,18 @@ class V7MainActivity : AppCompatActivity() {
                         "\nCross-manual links: ${bundle.graphLinksAdded}" +
                         "\nLearning boosts: ${learned.second}" +
                         "\n${bundle.safetySummary}"
-                    status("$label • ${hits.size} approved evidence results")
+                    b.txtEvidenceHeading.visibility = View.VISIBLE
+                    b.txtAnalysis.visibility = View.VISIBLE
+                    if (hits.isNotEmpty()) {
+                        sizeList(b.listResults, hits.size, 72, 5)
+                        b.listResults.visibility = View.VISIBLE
+                        b.btnAnswer.isEnabled = true
+                        b.txtAiHeading.visibility = View.VISIBLE
+                    } else {
+                        b.listResults.visibility = View.GONE
+                        b.txtAiHeading.visibility = View.GONE
+                    }
+                    status("$label • ${hits.size} approved evidence result(s)")
                 }
             }.onFailure { ui { status("Retrieval failed: ${it.message}") } }
         }
@@ -179,9 +201,11 @@ class V7MainActivity : AppCompatActivity() {
     private fun answer() {
         val r = repo ?: return toast("Import database first")
         val er = evidence ?: return toast("Evidence engine unavailable")
-        if (hits.isEmpty()) return toast("Run GROUNDED RETRIEVAL first")
+        if (hits.isEmpty()) return toast("Search approved evidence first")
         val q = queryForLearning.ifBlank { b.editQuery.text.toString().trim() }
-        b.txtAnswer.text = "Preparing evidence and local inference…"
+        b.txtAiHeading.visibility = View.VISIBLE
+        b.txtAnswer.visibility = View.VISIBLE
+        b.txtAnswer.text = "Preparing approved evidence and running local inference…"
         io.execute {
             runCatching {
                 val model = models.installedModel() ?: error("Select a compatible .litertlm model first")
@@ -227,7 +251,7 @@ class V7MainActivity : AppCompatActivity() {
     }
 
     private fun ocr(uri: Uri) {
-        status("Reading image/OCR…")
+        status("Reading image / OCR…")
         val rec = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         rec.process(InputImage.fromFilePath(this, uri))
             .addOnSuccessListener { t ->
@@ -238,20 +262,22 @@ class V7MainActivity : AppCompatActivity() {
                         val a = PostFlightAnalyzer.analyze(text)
                         cards = a.faults
                         b.listCards.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, a.faults)
-                        b.txtCards.text = "PFR • ${a.faults.size} fault(s). Tap a fault."
+                        showOcrCards("PFR • ${a.faults.size} fault(s) detected", a.faults.size)
                         a.faults.firstOrNull()?.let { retrieve(augment(it.text, it.ata, it.identifiers), "PFR FAULT") }
                     }
                     PhotoMode.CAPTAIN -> {
                         val a = CaptainReportAnalyzer.analyze(text)
                         cards = a.defects
                         b.listCards.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, a.defects)
-                        b.txtCards.text = "CAPTAIN/TECH LOG • ${a.defects.size} defect(s). Tap a defect."
+                        showOcrCards("TECH LOG • ${a.defects.size} defect(s) detected", a.defects.size)
                         a.defects.firstOrNull()?.let { retrieve(augment(it.text, it.ata, it.identifiers), "CREW DEFECT") }
                     }
                     PhotoMode.COMPONENT -> {
                         val a = ComponentAnalyzer.analyze(text)
                         cards = emptyList()
                         b.listCards.adapter = null
+                        b.listCards.visibility = View.GONE
+                        b.txtCards.visibility = View.GONE
                         val q = listOf(a.rawText, a.identifiers.joinToString(" "), "PART NUMBER FIN CONNECTOR COMPONENT")
                             .filter { it.isNotBlank() }.joinToString(" ")
                         retrieve(q, "COMPONENT PHOTO")
@@ -260,6 +286,17 @@ class V7MainActivity : AppCompatActivity() {
             }
             .addOnFailureListener { status("OCR failed: ${it.message}") }
             .addOnCompleteListener { rec.close() }
+    }
+
+    private fun showOcrCards(label: String, count: Int) {
+        b.txtCards.text = label
+        b.txtCards.visibility = View.VISIBLE
+        if (count > 0) {
+            sizeList(b.listCards, count, 64, 4)
+            b.listCards.visibility = View.VISIBLE
+        } else {
+            b.listCards.visibility = View.GONE
+        }
     }
 
     private fun cardClicked(p: Int) {
@@ -278,6 +315,7 @@ class V7MainActivity : AppCompatActivity() {
 
     private fun open(hit: SearchHit) {
         openedHit = hit
+        b.btnConfirm.visibility = View.VISIBLE
         val r = repo ?: return
         io.execute {
             val src = r.resolve(hit)
@@ -294,6 +332,13 @@ class V7MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun sizeList(list: ListView, itemCount: Int, rowDp: Int, maxRows: Int) {
+        val rows = itemCount.coerceIn(1, maxRows)
+        val px = (rowDp * resources.displayMetrics.density).toInt()
+        list.layoutParams = list.layoutParams.apply { height = rows * px }
+        list.requestLayout()
     }
 
     private fun status(s: String) { b.txtStatus.text = s }
