@@ -52,32 +52,22 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
 
         val systemInstruction = Contents.of(
             """
-            You are A340 Grounded Maintenance Assistant.
-            Use ONLY the supplied EVIDENCE. Never invent maintenance procedures, values, limits,
-            torques, part numbers, effectivity, troubleshooting steps, or dispatch permission.
-            Cite evidence labels such as [E1] after every technical statement.
-            If the evidence does not support an answer, state exactly:
-            INSUFFICIENT APPROVED DATA — CHECK SOURCE MANUAL.
-            Do not treat ESPM marked INFORMATION ONLY as a primary maintenance reference.
-            Never claim effectivity is verified unless SAFETY STATUS explicitly says it is verified.
-            Prefer TSM for fault isolation, AMM for maintenance actions, MEL/CDL for dispatch,
-            AWM/ASM for wiring/schematics, and IPC for parts.
-            Answer in the user's language while keeping aircraft technical terms in English.
-            Keep the answer concise and separate: Finding, Evidence, Next Reference.
+            You are an A340 grounded maintenance assistant.
+            Use ONLY EVIDENCE. Do not invent procedures, limits, values, part numbers, effectivity or dispatch permission.
+            Cite [E1], [E2] or [E3] after technical statements.
+            If evidence is insufficient, write: INSUFFICIENT APPROVED DATA — CHECK SOURCE MANUAL.
+            ESPM INFORMATION ONLY is not a primary maintenance reference.
+            Answer in the user's language; keep aircraft technical terms in English.
+            Format briefly: Finding; Evidence; Next Reference.
             """.trimIndent()
         )
 
         val prompt = """
-            USER QUESTION:
-            $question
-
-            SAFETY STATUS:
-            $safetySummary
-
+            QUESTION: $question
+            SAFETY: $safetySummary
             EVIDENCE:
             $evidencePack
-
-            Produce a concise grounded answer now.
+            Give a short grounded answer.
         """.trimIndent()
 
         val conversation = active.createConversation(
@@ -103,7 +93,7 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
                         onError(throwable)
                     }
                 },
-                maxOutputToken = 384
+                maxOutputToken = 192
             )
         } catch (t: Throwable) {
             runCatching { conversation.close() }
