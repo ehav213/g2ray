@@ -12,13 +12,16 @@ class AppLog(context: Context) {
         parentFile?.mkdirs()
         if (!exists()) createNewFile()
     }
+    private val appVersion = runCatching {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "unknown"
+    }.getOrDefault("unknown")
     private val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
 
     @Synchronized
     fun i(event: String, detail: String = "") = write(
         "INFO",
         event,
-        if (event == "APP_START") "version ${BuildConfig.VERSION_NAME}" else detail,
+        if (event == "APP_START") "version $appVersion" else detail,
         null
     )
 
