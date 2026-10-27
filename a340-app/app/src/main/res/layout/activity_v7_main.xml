@@ -313,7 +313,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="52dp"
                     android:layout_marginTop="14dp"
-                    android:text="SEARCH APPROVED MANUAL EVIDENCE"
+                    android:text="SEARCH LINE MAINTENANCE WORKFLOW"
                     android:textAllCaps="true"
                     android:textSize="13sp"
                     android:textStyle="bold"
@@ -407,7 +407,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="22dp"
-            android:text="APPROVED EVIDENCE"
+            android:text="LINE MAINTENANCE GUIDANCE"
             android:textColor="#8EA2BA"
             android:textSize="11sp"
             android:textStyle="bold"
@@ -424,6 +424,18 @@
             android:textColor="#AFC0D2"
             android:textIsSelectable="true"
             android:textSize="12sp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/txtSourcePacketHeading"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="SOURCE DOCUMENT PACKET — MEL FIRST • TAP TO OPEN ORIGINAL PDF PAGE"
+            android:textColor="#9FC5EA"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.05"
             android:visibility="gone" />
 
         <ListView
