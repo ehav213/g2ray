@@ -61,17 +61,17 @@ rep(
 )
 
 rep(
-'''    private fun parseApplicability(block: String): String = Regex("(?im)^Applicable to:\\s*(.+?)\\s*$")
+r'''    private fun parseApplicability(block: String): String = Regex("(?im)^Applicable to:\\s*(.+?)\\s*$")
 ''',
-'''    private fun parseApplicability(block: String): String = Regex("(?im)^\\s*Applicable to:\\s*(.+?)\\s*$")
+r'''    private fun parseApplicability(block: String): String = Regex("(?im)^\\s*Applicable to:\\s*(.+?)\\s*$")
 ''',
 'MEL applicability leading whitespace'
 )
 
 rep(
-'''        val matches = Regex("(?im)^ECAM Alert:\\s*(.+?)\\s*$").findAll(text).toList()
+r'''        val matches = Regex("(?im)^ECAM Alert:\\s*(.+?)\\s*$").findAll(text).toList()
 ''',
-'''        val matches = Regex("(?im)^\\s*ECAM Alert:\\s*(.+?)\\s*$").findAll(text).toList()
+r'''        val matches = Regex("(?im)^\\s*ECAM Alert:\\s*(.+?)\\s*$").findAll(text).toList()
 ''',
 'MEL ECAM leading whitespace'
 )
