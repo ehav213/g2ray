@@ -36,6 +36,10 @@ class AppLog(context: Context) {
         return lines.takeLast(maxLines.coerceAtLeast(1)).joinToString("\n")
     }
 
+    /** Backward-compatible full UI log accessor. */
+    @Synchronized
+    fun read(maxLines: Int = 120): String = tail(maxLines)
+
     @Synchronized
     fun clear() {
         file.writeText("")
@@ -62,6 +66,6 @@ class AppLog(context: Context) {
             }
             file.appendText(line + "\n")
         }
-        if (level == "ERROR") Log.e("A340TA", line, error) else Log.i("A340TA", line)
+        if (level == "ERROR") Log.e("LINE_ASSISTANT", line, error) else Log.i("LINE_ASSISTANT", line)
     }
 }
