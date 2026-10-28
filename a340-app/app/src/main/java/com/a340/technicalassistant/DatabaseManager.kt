@@ -49,22 +49,25 @@ class DatabaseManager(private val context: Context) {
         val db = SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
         db.use {
             val required = setOf(
-                "master_metadata", "manual_registry", "global_search_fts", "documents", "pages",
-                "cross_manual_links", "ipc_items", "awm_identifiers", "mel_items", "cdl_items", "espm_sections"
+                "master_metadata", "manual_registry", "global_search_fts", "documents", "pages", "chunks", "task_entries",
+                "cross_manual_links", "asm_sheets", "awm_diagrams", "awm_identifiers",
+                "ipc_items", "ipc_part_numbers", "mel_entries", "mel_items", "mel_procedures",
+                "cdl_items", "espm_sections"
             )
             val found = mutableSetOf<String>()
             it.rawQuery("SELECT name FROM sqlite_master WHERE type IN ('table','view')", null).use { c ->
                 while (c.moveToNext()) found += c.getString(0)
             }
             require(found.containsAll(required)) {
-                "Database is incomplete or too old for V6 AI Retrieval"
+                val missing = required.filterNot(found::contains).joinToString(", ")
+                "Technical Master is incomplete for Line Assistant 1.0. Missing: $missing"
             }
 
             val architecture = it.rawQuery(
                 "SELECT value FROM master_metadata WHERE key='architecture_version' LIMIT 1",
                 null
             ).use { c -> if (c.moveToFirst()) c.getString(0).toIntOrNull() ?: 0 else 0 }
-            require(architecture >= 5) { "V6 requires A340 Technical Master architecture v5 or newer" }
+            require(architecture >= 5) { "Line Assistant requires A340 Technical Master architecture v5 or newer" }
 
             val requiredManuals = setOf("AMM", "TSM", "ASM", "AWM", "IPC", "MEL", "CDL", "ESPM")
             val integrated = mutableSetOf<String>()
@@ -72,7 +75,7 @@ class DatabaseManager(private val context: Context) {
                 while (c.moveToNext()) integrated += c.getString(0)
             }
             require(integrated.containsAll(requiredManuals)) {
-                "V6 requires AMM/TSM/ASM/AWM/IPC/MEL/CDL/ESPM integrated"
+                "Line Assistant requires AMM/TSM/ASM/AWM/IPC/MEL/CDL/ESPM integrated"
             }
         }
     }
