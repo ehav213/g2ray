@@ -6,7 +6,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="A340 Technical Assistant"
+        android:label="Line Assistant"
         android:icon="@drawable/a340_app_icon"
         android:roundIcon="@drawable/a340_app_icon"
         android:theme="@style/Theme.A340TechnicalAssistant">
@@ -18,12 +18,14 @@
         <activity android:name=".V7MainActivity" android:exported="false" />
         <activity android:name=".V8MainActivity" android:exported="false" />
         <activity android:name=".V81MainActivity" android:exported="false" />
-        <activity android:name=".V84MainActivity" android:exported="true">
+        <activity android:name=".V84MainActivity" android:exported="false" />
+        <activity android:name=".LineAssistantActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
