@@ -5,7 +5,7 @@ import androidx.sqlite.SQLiteStatement
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 
 /**
- * Minimal cursor-style adapter used by SearchRepository.
+ * Minimal cursor-style adapter used by the technical repositories.
  * It deliberately uses AndroidX bundled SQLite so FTS5 behavior is identical
  * on every supported Android device instead of depending on the OEM SQLite build.
  */
@@ -57,6 +57,8 @@ class FtsCursor internal constructor(
     fun getString(index: Int): String = statement.getText(index)
 
     fun getInt(index: Int): Int = statement.getInt(index)
+
+    fun getLong(index: Int): Long = statement.getLong(index)
 
     fun getDouble(index: Int): Double = statement.getDouble(index)
 
