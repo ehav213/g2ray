@@ -17,7 +17,8 @@
         <activity android:name=".MainActivity" android:exported="false" />
         <activity android:name=".V7MainActivity" android:exported="false" />
         <activity android:name=".V8MainActivity" android:exported="false" />
-        <activity android:name=".V81MainActivity" android:exported="true">
+        <activity android:name=".V81MainActivity" android:exported="false" />
+        <activity android:name=".V84MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
