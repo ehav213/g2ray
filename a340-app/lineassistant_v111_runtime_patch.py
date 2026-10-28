@@ -1,166 +1,80 @@
 from pathlib import Path
 import runpy
 
+# Materialize the stable 1.1 engine changes first.
 runpy.run_path('lineassistant_v110_runtime_patch.py', run_name='__main__')
 
 engine_path = Path('app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt')
 s = engine_path.read_text()
 
-def rep(old: str, new: str, label: str, count: int = 1):
-    global s
-    actual = s.count(old)
-    if actual < count:
-        raise SystemExit(f'Line Assistant 1.1.1 patch failed: {label} (found {actual}, need {count})')
-    s = s.replace(old, new, count)
+# Manual defect text must not be promoted to a synthetic PFR merely because
+# PostFlightAnalyzer found a loose ATA/chapter token.
+old = '''        val parsed = runCatching { PostFlightAnalyzer.analyze(text).faults.firstOrNull() }.getOrNull()\n        if (parsed != null) return resolvePfr(parsed, aircraftProfile)\n'''
+new = '''        val parsed = runCatching { PostFlightAnalyzer.analyze(text).faults.firstOrNull() }.getOrNull()\n        val structuredPfr = parsed?.let {\n            !it.ataFull.isNullOrBlank() ||\n            !it.cockpitEffect.isNullOrBlank() ||\n            !it.source.isNullOrBlank() ||\n            !it.faultClass.isNullOrBlank() ||\n            text.contains("COCKPIT EFFECT:", true) ||\n            text.contains("MAINT ATA:", true) ||\n            text.contains("SOURCE:", true) ||\n            text.contains("CLASS:", true)\n        } == true\n        if (structuredPfr) return resolvePfr(parsed!!, aircraftProfile)\n'''
+if old not in s:
+    raise SystemExit('1.1.1 patch: resolveText structured-PFR guard not found')
+s = s.replace(old, new, 1)
 
-rep(
-'''        val parsed = runCatching { PostFlightAnalyzer.analyze(text).faults.firstOrNull() }.getOrNull()
-        if (parsed != null) return resolvePfr(parsed, aircraftProfile)
-''',
-'''        val parsed = runCatching { PostFlightAnalyzer.analyze(text).faults.firstOrNull() }.getOrNull()
-        val structuredPfr = parsed?.let {
-            !it.ataFull.isNullOrBlank() ||
-            !it.cockpitEffect.isNullOrBlank() ||
-            !it.source.isNullOrBlank() ||
-            !it.faultClass.isNullOrBlank() ||
-            text.contains("COCKPIT EFFECT:", true) ||
-            text.contains("MAINT ATA:", true) ||
-            text.contains("SOURCE:", true) ||
-            text.contains("CLASS:", true)
-        } == true
-        if (structuredPfr) return resolvePfr(parsed!!, aircraftProfile)
-''',
-'manual defect must not become synthetic PFR'
-)
+# ATA is hierarchical: 6 digits exact, 4 digits family, 2 digits chapter hint.
+old_ata = 'input.maintenanceAta.isNullOrBlank() || normalizeAta(input.maintenanceAta) == normalizeAta(record.maintenanceAta)'
+if s.count(old_ata) != 2:
+    raise SystemExit(f'1.1.1 patch: ATA compatibility sites={s.count(old_ata)} expected=2')
+s = s.replace(old_ata, 'ataCompatible(input.maintenanceAta, record.maintenanceAta)')
 
-old_ata = '''        val ataOk = input.maintenanceAta.isNullOrBlank() || normalizeAta(input.maintenanceAta) == normalizeAta(record.maintenanceAta)'''
-new_ata = '''        val ataOk = ataCompatible(input.maintenanceAta, record.maintenanceAta)'''
-actual = s.count(old_ata)
-if actual != 2:
-    raise SystemExit(f'Line Assistant 1.1.1 patch failed: ATA compatibility expected 2 sites, found {actual}')
-s = s.replace(old_ata, new_ata)
+needle = '    private fun normalizeAta(text: String): String = text.filter(Char::isDigit).take(6)\n'
+insert = '''    private fun normalizeAta(text: String): String = text.filter(Char::isDigit).take(6)\n\n    private fun ataCompatible(requested: String?, candidate: String): Boolean {\n        if (requested.isNullOrBlank()) return true\n        val r = normalizeAta(requested)\n        val c = normalizeAta(candidate)\n        return when {\n            r.length >= 6 -> c.take(6) == r.take(6)\n            r.length >= 4 -> c.take(4) == r.take(4)\n            r.length >= 2 -> c.take(2) == r.take(2)\n            else -> true\n        }\n    }\n'''
+if needle not in s:
+    raise SystemExit('1.1.1 patch: normalizeAta anchor not found')
+s = s.replace(needle, insert, 1)
 
-rep(
-'''    private fun normalizeAta(text: String): String = text.filter(Char::isDigit).take(6)
-''',
-'''    private fun normalizeAta(text: String): String = text.filter(Char::isDigit).take(6)
+# MEL source formatting: tolerate leading whitespace.
+if '(?im)^Applicable to:' in s:
+    s = s.replace('(?im)^Applicable to:', '(?im)^\\\\s*Applicable to:')
+elif '(?im)^\\\\s*Applicable to:' not in s:
+    raise SystemExit('1.1.1 patch: MEL applicability regex not found')
 
-    private fun ataCompatible(requested: String?, candidate: String): Boolean {
-        if (requested.isNullOrBlank()) return true
-        val r = normalizeAta(requested)
-        val c = normalizeAta(candidate)
-        return when {
-            r.length >= 6 -> c.take(6) == r.take(6)
-            r.length >= 4 -> c.take(4) == r.take(4)
-            r.length >= 2 -> c.take(2) == r.take(2)
-            else -> true
-        }
-    }
-''',
-'hierarchical ATA helper'
-)
+if '(?im)^ECAM Alert:' in s:
+    s = s.replace('(?im)^ECAM Alert:', '(?im)^\\\\s*ECAM Alert:')
+elif '(?im)^\\\\s*ECAM Alert:' not in s:
+    raise SystemExit('1.1.1 patch: ECAM regex not found')
 
-rep(
-r'''    private fun parseApplicability(block: String): String = Regex("(?im)^Applicable to:\\s*(.+?)\\s*$")
-''',
-r'''    private fun parseApplicability(block: String): String = Regex("(?im)^\\s*Applicable to:\\s*(.+?)\\s*$")
-''',
-'MEL applicability leading whitespace'
-)
+old = 'it.startsWith("Applicable to:", true)'
+if old in s:
+    s = s.replace(old, 'it.trimStart().startsWith("Applicable to:", true)')
+elif 'it.trimStart().startsWith("Applicable to:", true)' not in s:
+    raise SystemExit('1.1.1 patch: condition applicability parser not found')
 
-rep(
-r'''        val matches = Regex("(?im)^ECAM Alert:\\s*(.+?)\\s*$").findAll(text).toList()
-''',
-r'''        val matches = Regex("(?im)^\\s*ECAM Alert:\\s*(.+?)\\s*$").findAll(text).toList()
-''',
-'MEL ECAM leading whitespace'
-)
+# Mixed MEL branch (NO DISPATCH + Refer to Item) must fail closed.
+old = '''        return when {\n            upper.contains("NO DISPATCH") && refs.isEmpty() -> LineDispatchStatus.NO_DISPATCH\n            upper.contains("MUST BE OPERATIVE") -> LineDispatchStatus.MUST_BE_OPERATIVE\n            refs.isNotEmpty() -> LineDispatchStatus.CONDITIONAL\n            upper.contains("MAY BE INOPERATIVE") -> LineDispatchStatus.CONDITIONAL\n            else -> LineDispatchStatus.VERIFY_REQUIRED\n        }\n'''
+new = '''        return when {\n            upper.contains("MUST BE OPERATIVE") -> LineDispatchStatus.MUST_BE_OPERATIVE\n            upper.contains("NO DISPATCH") && refs.isEmpty() -> LineDispatchStatus.NO_DISPATCH\n            upper.contains("NO DISPATCH") && refs.isNotEmpty() -> LineDispatchStatus.VERIFY_REQUIRED\n            refs.isNotEmpty() -> LineDispatchStatus.CONDITIONAL\n            upper.contains("MAY BE INOPERATIVE") -> LineDispatchStatus.CONDITIONAL\n            else -> LineDispatchStatus.VERIFY_REQUIRED\n        }\n'''
+if old not in s:
+    raise SystemExit('1.1.1 patch: dispatchStatus block not found')
+s = s.replace(old, new, 1)
 
-rep(
-'''            val applicability = lines.subList(0, start + 1).lastOrNull { it.startsWith("Applicable to:", true) }
-                ?.substringAfter(':')?.trim().orEmpty()
-''',
-'''            val applicability = lines.subList(0, start + 1).lastOrNull { it.trimStart().startsWith("Applicable to:", true) }
-                ?.substringAfter(':')?.trim().orEmpty()
-''',
-'MEL condition applicability leading whitespace'
-)
+# Downstream references only from selected isolation branch/continuation.
+old = '        val scoped = tsm.branch?.evidence?.takeIf { it.isNotBlank() } ?: tsm.taskContent\n'
+new = '''        val scoped = tsm.branch?.let { branch ->\n            listOf(branch.isolation, branch.continuation)\n                .filter { it.isNotBlank() }\n                .joinToString("\\n")\n                .takeIf { it.isNotBlank() }\n        } ?: tsm.taskContent\n'''
+if old not in s:
+    raise SystemExit('1.1.1 patch: supportHits scope anchor not found')
+s = s.replace(old, new, 1)
 
-rep(
-'''        return when {
-            upper.contains("NO DISPATCH") && refs.isEmpty() -> LineDispatchStatus.NO_DISPATCH
-            upper.contains("MUST BE OPERATIVE") -> LineDispatchStatus.MUST_BE_OPERATIVE
-            refs.isNotEmpty() -> LineDispatchStatus.CONDITIONAL
-            upper.contains("MAY BE INOPERATIVE") -> LineDispatchStatus.CONDITIONAL
-            else -> LineDispatchStatus.VERIFY_REQUIRED
-        }
-''',
-'''        return when {
-            upper.contains("MUST BE OPERATIVE") -> LineDispatchStatus.MUST_BE_OPERATIVE
-            upper.contains("NO DISPATCH") && refs.isEmpty() -> LineDispatchStatus.NO_DISPATCH
-            upper.contains("NO DISPATCH") && refs.isNotEmpty() -> LineDispatchStatus.VERIFY_REQUIRED
-            refs.isNotEmpty() -> LineDispatchStatus.CONDITIONAL
-            upper.contains("MAY BE INOPERATIVE") -> LineDispatchStatus.CONDITIONAL
-            else -> LineDispatchStatus.VERIFY_REQUIRED
-        }
-''',
-'MEL mixed branch fail closed'
-)
-
-rep(
-'''        val scoped = tsm.branch?.evidence?.takeIf { it.isNotBlank() } ?: tsm.taskContent
-''',
-'''        val scoped = tsm.branch?.let { branch ->
-            listOf(branch.isolation, branch.continuation)
-                .filter { it.isNotBlank() }
-                .joinToString("\\n")
-                .takeIf { it.isNotBlank() }
-        } ?: tsm.taskContent
-''',
-'strict branch-scoped downstream references'
-)
-
+s = s.replace('LINE ASSISTANT 1.1 • DATABASE-NATIVE WORKFLOW', 'LINE ASSISTANT 1.1.1 • DATABASE-NATIVE WORKFLOW')
 engine_path.write_text(s)
 
+# AI is locked unless deterministic evidence exists.
 activity_path = Path('app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt')
 a = activity_path.read_text()
-
-old = '''        btnAi.isEnabled = result.evidencePack.isNotBlank() && models.installedModel() != null
-        txtAiState.visibility = View.VISIBLE
-        txtAiState.text = if (models.installedModel() == null) {
-            "LOCAL AI NOT INSTALLED • verified MEL/TSM result remains available"
-        } else {
-            "AI READY • exact MEL/TSM evidence packet prepared"
-        }
-'''
-new = '''        val verifiedEvidence = result.tsm != null ||
-            (result.mel.status != LineDispatchStatus.NO_ENTRY && result.mel.exactBlock.isNotBlank())
-        btnAi.isEnabled = verifiedEvidence && models.installedModel() != null
-        txtAiState.visibility = View.VISIBLE
-        txtAiState.text = when {
-            !verifiedEvidence -> "LOCAL AI LOCKED • no verified MEL/TSM evidence resolved"
-            models.installedModel() == null -> "LOCAL AI NOT INSTALLED • verified deterministic result remains available"
-            else -> "AI READY • verified MEL/TSM evidence packet prepared"
-        }
-'''
+old = '''        btnAi.isEnabled = result.evidencePack.isNotBlank() && models.installedModel() != null\n        txtAiState.visibility = View.VISIBLE\n        txtAiState.text = if (models.installedModel() == null) {\n            "LOCAL AI NOT INSTALLED • verified MEL/TSM result remains available"\n        } else {\n            "AI READY • exact MEL/TSM evidence packet prepared"\n        }\n'''
+new = '''        val verifiedEvidence = result.tsm != null ||\n            (result.mel.status != LineDispatchStatus.NO_ENTRY && result.mel.exactBlock.isNotBlank())\n        btnAi.isEnabled = verifiedEvidence && models.installedModel() != null\n        txtAiState.visibility = View.VISIBLE\n        txtAiState.text = when {\n            !verifiedEvidence -> "LOCAL AI LOCKED • no verified MEL/TSM evidence resolved"\n            models.installedModel() == null -> "LOCAL AI NOT INSTALLED • deterministic result remains available"\n            else -> "AI READY • verified MEL/TSM evidence packet prepared"\n        }\n'''
 if old not in a:
-    raise SystemExit('Line Assistant 1.1.1 patch failed: AI gate UI')
+    raise SystemExit('1.1.1 patch: AI UI gate not found')
 a = a.replace(old, new, 1)
 
-old = '''    private fun runGroundedAi() {
-        val result = currentResult ?: return toast("Resolve a defect first")
-        val model = models.installedModel() ?: return toast("No local AI model installed")
-'''
-new = '''    private fun runGroundedAi() {
-        val result = currentResult ?: return toast("Resolve a defect first")
-        val verifiedEvidence = result.tsm != null ||
-            (result.mel.status != LineDispatchStatus.NO_ENTRY && result.mel.exactBlock.isNotBlank())
-        if (!verifiedEvidence) return toast("No verified MEL/TSM evidence to explain")
-        val model = models.installedModel() ?: return toast("No local AI model installed")
-'''
+old = '''    private fun runGroundedAi() {\n        val result = currentResult ?: return toast("Resolve a defect first")\n        val model = models.installedModel() ?: return toast("No local AI model installed")\n'''
+new = '''    private fun runGroundedAi() {\n        val result = currentResult ?: return toast("Resolve a defect first")\n        val verifiedEvidence = result.tsm != null ||\n            (result.mel.status != LineDispatchStatus.NO_ENTRY && result.mel.exactBlock.isNotBlank())\n        if (!verifiedEvidence) return toast("No verified MEL/TSM evidence to explain")\n        val model = models.installedModel() ?: return toast("No local AI model installed")\n'''
 if old not in a:
-    raise SystemExit('Line Assistant 1.1.1 patch failed: AI runtime gate')
+    raise SystemExit('1.1.1 patch: AI runtime gate not found')
 a = a.replace(old, new, 1)
-
 activity_path.write_text(a)
-print('Line Assistant 1.1.1 manual-defect, MEL and AI gating patch applied')
+
+print('Line Assistant 1.1.1 resolver patch applied successfully')
