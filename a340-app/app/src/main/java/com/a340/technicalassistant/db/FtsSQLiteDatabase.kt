@@ -60,6 +60,8 @@ class FtsCursor internal constructor(
 
     fun getDouble(index: Int): Double = statement.getDouble(index)
 
+    fun isNull(index: Int): Boolean = statement.isNull(index)
+
     override fun close() {
         statement.close()
     }
