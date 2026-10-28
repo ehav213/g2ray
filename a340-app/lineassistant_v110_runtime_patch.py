@@ -79,5 +79,10 @@ rep(
 '''                    .append(" Placard=").append(c.placard)\n                    .append(" Applicability=").append(c.applicability.ifBlank { "UNKNOWN" }).append('\\n')''',
 'evidence condition applicability')
 
+rep(
+'''        if (fallback != null) {\n            return LineMelResolution(\n                status = LineDispatchStatus.VERIFY_REQUIRED,\n                title = fallback.reference + " — " + fallback.title,\n                ataChapter = fallback.reference.take(2),\n                page = repo.resolve(fallback)?.pdfPage,\n                exactBlock = fallback.snippet,\n                itemRefs = listOf(fallback.reference),\n                note = "No exact MEL ECAM entry was resolved. Equipment-level MEL candidate only; verify original MEL, conditions and effectivity."\n            )\n        }''',
+'''        if (fallback != null) {\n            val conditions = loadMelConditions(fallback.reference, aircraftProfile)\n            return LineMelResolution(\n                status = LineDispatchStatus.VERIFY_REQUIRED,\n                title = fallback.reference + " — " + fallback.title,\n                ataChapter = fallback.reference.take(2),\n                page = repo.resolve(fallback)?.pdfPage,\n                exactBlock = fallback.snippet,\n                itemRefs = listOf(fallback.reference),\n                note = "No exact MEL ECAM entry was resolved. Equipment-level MEL candidate only; verify original MEL, select the applicable condition, (O)/(M) procedures and effectivity.",\n                conditions = conditions\n            )\n        }''',
+'equipment fallback condition details')
+
 path.write_text(s)
-print('Line Assistant 1.1 condition-effectivity and TSM selector patch applied')
+print('Line Assistant 1.1 final troubleshooting/MEL patch applied')
