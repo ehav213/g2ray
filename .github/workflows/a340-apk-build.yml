@@ -13,6 +13,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Apply Line Assistant 1.1 final logic patch
+        working-directory: a340-app
+        run: python lineassistant_v110_runtime_patch.py
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
