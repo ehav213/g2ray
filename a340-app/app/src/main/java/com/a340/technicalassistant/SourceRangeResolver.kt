@@ -1,6 +1,6 @@
 package com.a340.technicalassistant
 
-import android.database.sqlite.SQLiteDatabase
+import com.a340.technicalassistant.db.FtsSQLiteDatabase as SQLiteDatabase
 import java.io.File
 
 /** Resolves a technical source reference to the full PDF range that belongs to it. */
@@ -73,7 +73,6 @@ class SourceRangeResolver(dbFile: File) : AutoCloseable {
     private fun melRange(ref: String, fallback: Int): SourceRange {
         if (ref.isBlank()) return SourceRange(fallback, fallback, "MEL SOURCE PAGE")
 
-        // Prefer a MEL item (e.g. 49-10-01A). If not present, fall back to a MEL entry.
         val item = runCatching {
             db.rawQuery(
                 "SELECT CAST(document_id AS TEXT),start_pdf_page FROM mel_items WHERE UPPER(mel_ref)=? ORDER BY start_pdf_page LIMIT 1",
@@ -120,11 +119,7 @@ class SourceRangeResolver(dbFile: File) : AutoCloseable {
         return (next?.minus(1) ?: start + 6).coerceIn(start, start + 10)
     }
 
-    private fun cleanReference(reference: String): String {
-        var r = reference.trim()
-        r = r.removePrefix("TASK ").trim()
-        return r
-    }
+    private fun cleanReference(reference: String): String = reference.trim().removePrefix("TASK ").trim()
 
     override fun close() = db.close()
 }
