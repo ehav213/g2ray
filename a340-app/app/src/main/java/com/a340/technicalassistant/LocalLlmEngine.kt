@@ -39,6 +39,78 @@ class LocalLlmEngine(private val context: Context) : AutoCloseable {
         }
     }
 
+    /**
+     * Candidate selector used only after deterministic database retrieval has produced
+     * real TSM task references. The model is forbidden to create a new reference.
+     */
+    fun selectCandidate(
+        fault: String,
+        candidates: List<SearchHit>,
+        onResult: (String?) -> Unit,
+        onError: (Throwable) -> Unit
+    ) {
+        val active = engine ?: error("Load a local .litertlm model first")
+        require(candidates.isNotEmpty()) { "No verified candidates supplied" }
+
+        val allowed = candidates.take(8)
+        val allowedRefs = allowed.map { it.reference.trim() }.filter { it.isNotBlank() }
+        val systemInstruction = Contents.of(
+            """
+            You are a constrained Airbus A340 TSM candidate ranker.
+            You may ONLY select one task reference that appears verbatim in CANDIDATES.
+            Do not invent, alter, complete, or infer a task reference.
+            Match abbreviations semantically: PROX=PROXIMITY, SNSR/SNSRS=SENSOR/SENSORS.
+            Prefer exact component identifiers such as 39GA1, 39GA2, LGCIU1, LGCIU2.
+            If the evidence is ambiguous, output NONE.
+            Output only the selected task reference or NONE. No explanation.
+            """.trimIndent()
+        )
+        val candidateText = allowed.mapIndexed { i, h ->
+            "C${i + 1}: ${h.reference}\nTITLE: ${h.title}\nEVIDENCE: ${h.snippet.replace(Regex("\\s+"), " ").take(420)}"
+        }.joinToString("\n\n")
+        val prompt = "FAULT:\n$fault\n\nCANDIDATES:\n$candidateText\n\nReturn one allowed reference or NONE."
+        val conversation = active.createConversation(ConversationConfig(systemInstruction = systemInstruction))
+        val accumulated = StringBuilder()
+
+        try {
+            conversation.sendMessageAsync(
+                prompt,
+                object : MessageCallback {
+                    override fun onMessage(message: Message) {
+                        val text = message.toString()
+                        if (text.isBlank()) return
+                        synchronized(accumulated) {
+                            val previous = accumulated.toString()
+                            when {
+                                previous.isNotEmpty() && text.startsWith(previous) -> {
+                                    accumulated.setLength(0); accumulated.append(text)
+                                }
+                                previous.endsWith(text) -> Unit
+                                else -> accumulated.append(text)
+                            }
+                        }
+                    }
+
+                    override fun onDone() {
+                        runCatching { conversation.close() }
+                        val raw = accumulated.toString().uppercase()
+                        val selected = allowedRefs.firstOrNull { ref -> raw.contains(ref.uppercase()) }
+                        onResult(selected)
+                    }
+
+                    override fun onError(throwable: Throwable) {
+                        runCatching { conversation.close() }
+                        onError(throwable)
+                    }
+                },
+                maxOutputToken = 32
+            )
+        } catch (t: Throwable) {
+            runCatching { conversation.close() }
+            onError(t)
+        }
+    }
+
     fun answerStreaming(
         question: String,
         evidencePack: String,
