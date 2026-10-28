@@ -12,6 +12,18 @@ enum class LineDispatchStatus {
     NO_ENTRY
 }
 
+data class LineMelCondition(
+    val conditionRef: String,
+    val title: String,
+    val repairInterval: String,
+    val nbrInstalled: String,
+    val nbrRequired: String,
+    val placard: String,
+    val requirements: String,
+    val procedureRefs: List<String>,
+    val ammTaskRefs: List<String>
+)
+
 data class LineMelResolution(
     val status: LineDispatchStatus,
     val title: String,
@@ -19,7 +31,22 @@ data class LineMelResolution(
     val page: Int?,
     val exactBlock: String,
     val itemRefs: List<String>,
-    val note: String
+    val note: String,
+    val applicability: String = "",
+    val conditions: List<LineMelCondition> = emptyList(),
+    val variantCount: Int = 1,
+    val selectedByProfile: Boolean = false
+)
+
+data class LineTroubleshootingBranch(
+    val selector: String,
+    val paragraph: String?,
+    val redirectTaskRef: String?,
+    val possibleCauses: String,
+    val faultConfirmation: String,
+    val isolation: String,
+    val continuation: String,
+    val evidence: String
 )
 
 data class LineTsmResolution(
@@ -36,7 +63,9 @@ data class LineTsmResolution(
     val source: String,
     val faultClass: String,
     val identifiers: List<String>,
-    val taskContent: String
+    val taskContent: String,
+    val branch: LineTroubleshootingBranch? = null,
+    val cockpitEffectSource: String = "TSM INDEX"
 )
 
 data class LineAssistantResult(
@@ -50,14 +79,11 @@ data class LineAssistantResult(
 )
 
 /**
- * Database-native Line Maintenance engine.
+ * Line Assistant 1.1 database-native resolver.
  *
- * Design rules:
- * 1) MEL is resolved from the cockpit effect / ECAM entry, never from a generic fault-word score.
- * 2) TSM troubleshooting is resolved through the TSM Warnings/Malfunction index to an exact Ref. TASK.
- * 3) The accepted Ref. TASK must exist in task_entries before it can be shown.
- * 4) AMM/ASM/AWM/IPC support is derived only after the exact TSM task has been resolved.
- * 5) AI never chooses MEL dispatch status or invents a TSM task; it receives the already verified packet.
+ * TSM: PFR -> Warnings/Malfunction index -> exact Ref. TASK -> exact task text -> applicable branch.
+ * MEL: Cockpit effect/ECAM -> exact ECAM block -> effectivity variant -> MEL item/condition/(O)/(M).
+ * AI receives only the already verified MEL block and selected troubleshooting branch.
  */
 class LineAssistantEngine(
     dbFile: File,
@@ -88,7 +114,8 @@ class LineAssistantEngine(
         val maintenanceMessage: String,
         val source: String,
         val faultClass: String,
-        val identifiers: List<String>
+        val identifiers: List<String>,
+        val hasFaultMessage: Boolean
     )
 
     private data class TaskRow(
@@ -107,26 +134,33 @@ class LineAssistantEngine(
         val title: String,
         val page: Int,
         val endPage: Int,
-        val applicableTo: String,
         val content: String
     )
 
-    fun resolvePfr(fault: PostFlightAnalyzer.Fault, aircraftProfile: String): LineAssistantResult {
-        return resolve(
-            FaultInput(
-                rawText = fault.displaySummary(),
-                maintenanceMessage = fault.text,
-                maintenanceAta = fault.ataFull ?: fault.ata,
-                cockpitMessage = fault.cockpitEffect,
-                cockpitAta = fault.cockpitAta,
-                source = fault.source,
-                faultClass = fault.faultClass,
-                identifiers = (fault.identifiers + extractIdentifiers(fault.text)).distinct(),
-                parsedFault = fault
-            ),
-            aircraftProfile
-        )
-    }
+    private data class MelCandidate(
+        val row: MelEntryRow,
+        val block: String,
+        val applicability: String,
+        val itemRefs: List<String>,
+        val status: LineDispatchStatus
+    )
+
+    private enum class ApplicabilityMatch { MATCH, NO_MATCH, UNKNOWN }
+
+    fun resolvePfr(fault: PostFlightAnalyzer.Fault, aircraftProfile: String): LineAssistantResult = resolve(
+        FaultInput(
+            rawText = fault.displaySummary(),
+            maintenanceMessage = fault.text,
+            maintenanceAta = fault.ataFull ?: fault.ata,
+            cockpitMessage = fault.cockpitEffect,
+            cockpitAta = fault.cockpitAta,
+            source = fault.source,
+            faultClass = fault.faultClass,
+            identifiers = (fault.identifiers + extractIdentifiers(fault.text)).distinct(),
+            parsedFault = fault
+        ),
+        aircraftProfile
+    )
 
     fun resolveText(text: String, aircraftProfile: String): LineAssistantResult {
         val parsed = runCatching { PostFlightAnalyzer.analyze(text).faults.firstOrNull() }.getOrNull()
@@ -159,8 +193,10 @@ class LineAssistantEngine(
         val indexRecord = findTsmIndexRecord(input)
         val cockpitMessage = input.cockpitMessage ?: indexRecord?.cockpitMessage
         val cockpitAta = input.cockpitAta ?: indexRecord?.cockpitAta
+        val cockpitSource = if (!input.cockpitMessage.isNullOrBlank()) "PFR" else if (indexRecord != null) "VERIFIED TSM INDEX" else "UNRESOLVED"
+
         val mel = resolveMel(cockpitMessage, cockpitAta, input.rawText, aircraftProfile)
-        val tsm = indexRecord?.let(::resolveTaskFromIndex)
+        val tsm = indexRecord?.let { resolveTaskFromIndex(it, input, cockpitSource) }
 
         val orderedHits = mutableListOf<SearchHit>()
         val seen = linkedSetOf<String>()
@@ -171,29 +207,36 @@ class LineAssistantEngine(
         }
 
         melEntryHit(cockpitMessage, mel)?.let(::add)
-        mel.itemRefs.forEach { ref -> melItemHit(ref)?.let(::add) }
-        mel.itemRefs.flatMap(::melProcedureHits).forEach(::add)
+        mel.itemRefs.forEach { melItemHit(it)?.let(::add) }
+        mel.conditions.flatMap { condition -> melProcedureHits(condition.conditionRef) }.forEach(::add)
 
         if (tsm != null) {
             taskHit(tsm.taskRef, "TSM")?.let(::add)
             supportHits(tsm, input).forEach(::add)
         }
 
-        val summary = buildSummary(input, mel, tsm, aircraftProfile)
-        val safety = buildSafety(mel, tsm, aircraftProfile)
-        val evidence = buildEvidencePacket(input, mel, tsm, orderedHits)
-        return LineAssistantResult(summary, safety, evidence, orderedHits, mel, tsm, input.parsedFault)
+        return LineAssistantResult(
+            summary = buildSummary(input, mel, tsm, aircraftProfile),
+            safetySummary = buildSafety(mel, tsm, aircraftProfile),
+            evidencePack = buildEvidencePacket(input, mel, tsm, orderedHits),
+            hits = orderedHits,
+            mel = mel,
+            tsm = tsm,
+            structuredFault = input.parsedFault
+        )
     }
 
     private fun findTsmIndexRecord(input: FaultInput): TsmIndexRecord? {
-        val ids = (input.identifiers + extractIdentifiers(input.maintenanceMessage)).map(::normalizeToken).filter { it.length >= 3 }.distinct()
+        val ids = (input.identifiers + extractIdentifiers(input.maintenanceMessage))
+            .map(::normalizeToken).filter { it.length >= 3 }.distinct()
         val words = significantWords(input.maintenanceMessage)
+        val cockpitWords = significantWords(input.cockpitMessage.orEmpty())
         val expressions = mutableListOf<String>()
         if (ids.isNotEmpty()) expressions += ids.take(4).joinToString(" AND ") { "\"$it\"" }
         if (words.isNotEmpty()) expressions += words.take(5).joinToString(" AND ") { "\"$it\"*" }
-        if (ids.isNotEmpty() || words.isNotEmpty()) {
-            expressions += (ids.take(3) + words.take(5)).distinct().joinToString(" OR ") { "\"$it\"*" }
-        }
+        if (cockpitWords.isNotEmpty()) expressions += cockpitWords.take(5).joinToString(" AND ") { "\"$it\"*" }
+        val orTerms = (ids.take(3) + words.take(5) + cockpitWords.take(4)).distinct()
+        if (orTerms.isNotEmpty()) expressions += orTerms.joinToString(" OR ") { "\"$it\"*" }
 
         val candidates = mutableListOf<TsmIndexRecord>()
         val dedupe = linkedSetOf<String>()
@@ -202,16 +245,14 @@ class LineAssistantEngine(
                 SELECT c.document_filename,c.pdf_page,c.content
                 FROM chunks_fts f JOIN chunks c ON c.chunk_id=f.chunk_id
                 WHERE chunks_fts MATCH ? AND UPPER(COALESCE(c.manual,''))='TSM'
-                ORDER BY c.pdf_page LIMIT 120
+                ORDER BY c.pdf_page LIMIT 180
             """.trimIndent()
             runCatching {
                 db.rawQuery(sql, arrayOf(expr)).use { c ->
                     while (c.moveToNext()) {
-                        val filename = c.getString(0)
-                        val page = c.getInt(1)
-                        parseTsmIndexRecords(filename, page, c.getString(2)).forEach { record ->
-                            val k = "${record.indexFilename}|${record.indexPage}|${record.indexTaskRef}|${record.maintenanceMessage}|${record.source}|${record.identifiers.joinToString()}"
-                            if (dedupe.add(k)) candidates += record
+                        parseTsmIndexRecords(c.getString(0), c.getInt(1), c.getString(2)).forEach { record ->
+                            val key = "${record.indexFilename}|${record.indexPage}|${record.indexTaskRef}|${record.maintenanceMessage}|${record.cockpitMessage}|${record.source}"
+                            if (dedupe.add(key)) candidates += record
                         }
                     }
                 }
@@ -232,6 +273,7 @@ class LineAssistantEngine(
         val starts = lines.indices.filter { lines[it].equals("WARNINGS/MALFUNCTION", true) }
         if (starts.isEmpty()) return emptyList()
         val out = mutableListOf<TsmIndexRecord>()
+
         starts.forEachIndexed { idx, start ->
             val end = starts.getOrNull(idx + 1) ?: lines.size
             val block = lines.subList(start, end)
@@ -239,53 +281,70 @@ class LineAssistantEngine(
                 Regex("(?i)\\bTASK\\s+(\\d{2}-\\d{2}-\\d{2}-810-\\d{3}(?:-[A-Z]\\d*)?)\\b")
                     .find(line)?.groupValues?.getOrNull(1)?.uppercase(Locale.US)
             } ?: return@forEachIndexed
+
             val faultMarker = block.indexOfFirst { it.equals("FAULT MESSAGES", true) }
-            if (faultMarker < 0) return@forEachIndexed
+            if (faultMarker >= 0) {
+                val before = block.subList(0, faultMarker)
+                val cockpitAtaIndex = before.indexOfLast { it.matches(Regex("\\d{2}-\\d{2}")) }
+                val cockpitAta = before.getOrNull(cockpitAtaIndex).orEmpty()
+                val cockpitValues = if (cockpitAtaIndex >= 0) before.drop(cockpitAtaIndex + 1) else emptyList()
+                val cockpitType = cockpitValues.lastOrNull().orEmpty()
+                val cockpitMessage = cockpitValues.dropLast(1).joinToString(" ").trim()
 
-            val before = block.subList(0, faultMarker)
-            val cockpitAtaIndex = before.indexOfLast { it.matches(Regex("\\d{2}-\\d{2}")) }
-            val cockpitAta = before.getOrNull(cockpitAtaIndex).orEmpty()
-            val cockpitValues = if (cockpitAtaIndex >= 0) before.drop(cockpitAtaIndex + 1) else emptyList()
-            val cockpitType = cockpitValues.lastOrNull().orEmpty()
-            val cockpitMessage = cockpitValues.dropLast(1).joinToString(" ").trim()
-
-            val after = block.drop(faultMarker + 1)
-            val maintAtaIndex = after.indexOfFirst { it.matches(Regex("\\d{2}-\\d{2}-\\d{2}")) }
-            if (maintAtaIndex < 0) return@forEachIndexed
-            val classIndex = ((maintAtaIndex + 1) until after.size).firstOrNull { after[it] in setOf("1", "2", "3") } ?: return@forEachIndexed
-            if (classIndex - maintAtaIndex < 3) return@forEachIndexed
-            val source = after[classIndex - 1]
-            val message = after.subList(maintAtaIndex + 1, classIndex - 1).joinToString(" ").trim()
-            val identifiers = mutableListOf<String>()
-            val idMarker = after.indexOfFirst { it.equals("IDENTIFIERS", true) || it.equals("IDENTIFIER", true) }
-            if (idMarker >= 0) {
-                after.drop(idMarker + 1).take(6).forEach { line ->
-                    if (line.matches(Regex("[A-Z0-9][A-Z0-9/.,-]*"))) {
-                        identifiers += line.split(Regex("[/, ]+")).filter { it.isNotBlank() }
+                val after = block.drop(faultMarker + 1)
+                val maintAtaIndex = after.indexOfFirst { it.matches(Regex("\\d{2}-\\d{2}-\\d{2}")) }
+                if (maintAtaIndex < 0) return@forEachIndexed
+                val classIndex = ((maintAtaIndex + 1) until after.size).firstOrNull { after[it] in setOf("1", "2", "3") }
+                    ?: return@forEachIndexed
+                if (classIndex - maintAtaIndex < 3) return@forEachIndexed
+                val source = after[classIndex - 1]
+                val message = after.subList(maintAtaIndex + 1, classIndex - 1).joinToString(" ").trim()
+                val identifiers = mutableListOf<String>()
+                val idMarker = after.indexOfFirst { it.equals("IDENTIFIERS", true) || it.equals("IDENTIFIER", true) }
+                if (idMarker >= 0) {
+                    after.drop(idMarker + 1).take(8).forEach { line ->
+                        if (line.matches(Regex("[A-Z0-9][A-Z0-9/.,-]*"))) {
+                            identifiers += line.split(Regex("[/, ]+")).filter { it.isNotBlank() }
+                        }
                     }
                 }
+                out += TsmIndexRecord(filename, page, task, cockpitAta, cockpitMessage, cockpitType,
+                    after[maintAtaIndex], message, source, after[classIndex], identifiers.distinct(), true)
+            } else {
+                val header = block.indexOfFirst { it.equals("TYPE", true) }
+                if (header < 0) return@forEachIndexed
+                val payload = block.drop(header + 1).filterNot { it.startsWith("** ON A/C") || it.startsWith("EMB SB") }
+                if (payload.isEmpty()) return@forEachIndexed
+                val ataIndex = payload.indexOfFirst { it.matches(Regex("\\d{2}-\\d{2}")) }
+                val cockpitAta = if (ataIndex >= 0) payload[ataIndex] else ""
+                val startMessage = if (ataIndex >= 0) ataIndex + 1 else 0
+                val knownTypes = listOf("OBSERVATIONS", "EWD WARNING(S)", "PFD FLAG(S)", "ND FLAG(S)", "STS-INOP SYSTEM")
+                var joined = payload.drop(startMessage).joinToString(" ").trim()
+                val type = knownTypes.firstOrNull { joined.endsWith(it, true) }.orEmpty()
+                if (type.isNotBlank()) joined = joined.dropLast(type.length).trim()
+                if (joined.isBlank()) return@forEachIndexed
+                out += TsmIndexRecord(filename, page, task, cockpitAta, joined, type,
+                    "", "", "", "", emptyList(), false)
             }
-            out += TsmIndexRecord(
-                indexFilename = filename,
-                indexPage = page,
-                indexTaskRef = task,
-                cockpitAta = cockpitAta,
-                cockpitMessage = cockpitMessage,
-                cockpitType = cockpitType,
-                maintenanceAta = after[maintAtaIndex],
-                maintenanceMessage = message,
-                source = source,
-                faultClass = after[classIndex],
-                identifiers = identifiers.distinct()
-            )
         }
         return out
     }
 
     private fun acceptableIndexMatch(record: TsmIndexRecord, input: FaultInput): Boolean {
+        if (!record.hasFaultMessage) {
+            val query = input.cockpitMessage?.takeIf { it.isNotBlank() } ?: input.maintenanceMessage
+            val qWords = significantWords(query)
+            val hay = normalizeText(record.cockpitMessage)
+            val msgOk = qWords.isNotEmpty() && qWords.all { containsWholeToken(hay, it) }
+            val qAta = input.cockpitAta ?: input.maintenanceAta
+            val ataOk = qAta.isNullOrBlank() || record.cockpitAta.isBlank() || normalizeAta(qAta).take(4) == normalizeAta(record.cockpitAta).take(4)
+            return msgOk && ataOk
+        }
+
         val ataOk = input.maintenanceAta.isNullOrBlank() || normalizeAta(input.maintenanceAta) == normalizeAta(record.maintenanceAta)
         if (!ataOk) return false
-        val requestedIds = (input.identifiers + extractIdentifiers(input.maintenanceMessage)).map(::normalizeToken).filter { it.length >= 3 }.distinct()
+        val requestedIds = (input.identifiers + extractIdentifiers(input.maintenanceMessage))
+            .map(::normalizeToken).filter { it.length >= 3 }.distinct()
         val recordText = normalizeText(record.maintenanceMessage + " " + record.identifiers.joinToString(" "))
         if (requestedIds.isNotEmpty() && requestedIds.any { !containsWholeToken(recordText, it) }) return false
         val a = baseFaultMessage(input.maintenanceMessage)
@@ -293,13 +352,18 @@ class LineAssistantEngine(
         val words = significantWords(a)
         val messageOk = a == b || (words.isNotEmpty() && words.all { containsWholeToken(normalizeText(b), it) })
         if (!messageOk) return false
-        if (!input.source.isNullOrBlank() && normalizeToken(input.source) != normalizeToken(record.source)) return false
+        if (!input.source.isNullOrBlank() && record.source.isNotBlank() && normalizeToken(input.source) != normalizeToken(record.source)) return false
         return true
     }
 
     private fun exactIndexMatch(record: TsmIndexRecord, input: FaultInput): Boolean {
+        if (!record.hasFaultMessage) {
+            val q = input.cockpitMessage?.takeIf { it.isNotBlank() } ?: input.maintenanceMessage
+            return normalizeText(q) == normalizeText(record.cockpitMessage)
+        }
         val exactMessage = normalizeText(input.maintenanceMessage) == normalizeText(record.maintenanceMessage)
-        val ids = (input.identifiers + extractIdentifiers(input.maintenanceMessage)).map(::normalizeToken).filter { it.length >= 3 }.distinct()
+        val ids = (input.identifiers + extractIdentifiers(input.maintenanceMessage))
+            .map(::normalizeToken).filter { it.length >= 3 }.distinct()
         val recordText = normalizeText(record.maintenanceMessage + " " + record.identifiers.joinToString(" "))
         val idsOk = ids.isEmpty() || ids.all { containsWholeToken(recordText, it) }
         val ataOk = input.maintenanceAta.isNullOrBlank() || normalizeAta(input.maintenanceAta) == normalizeAta(record.maintenanceAta)
@@ -308,37 +372,59 @@ class LineAssistantEngine(
 
     private fun indexScore(record: TsmIndexRecord, input: FaultInput): Int {
         var score = 0
-        if (normalizeText(input.maintenanceMessage) == normalizeText(record.maintenanceMessage)) score += 400
-        if (baseFaultMessage(input.maintenanceMessage) == baseFaultMessage(record.maintenanceMessage)) score += 180
-        if (!input.maintenanceAta.isNullOrBlank() && normalizeAta(input.maintenanceAta) == normalizeAta(record.maintenanceAta)) score += 140
-        if (!input.source.isNullOrBlank() && normalizeToken(input.source) == normalizeToken(record.source)) score += 80
-        if (!input.faultClass.isNullOrBlank() && input.faultClass == record.faultClass) score += 40
-        if (!input.cockpitMessage.isNullOrBlank() && melTitleCompatible(input.cockpitMessage, record.cockpitMessage)) score += 100
-        val recordText = normalizeText(record.maintenanceMessage + " " + record.identifiers.joinToString(" "))
-        (input.identifiers + extractIdentifiers(input.maintenanceMessage)).distinct().forEach {
-            if (containsWholeToken(recordText, normalizeToken(it))) score += 120
+        if (record.hasFaultMessage) {
+            if (normalizeText(input.maintenanceMessage) == normalizeText(record.maintenanceMessage)) score += 400
+            if (baseFaultMessage(input.maintenanceMessage) == baseFaultMessage(record.maintenanceMessage)) score += 180
+            if (!input.maintenanceAta.isNullOrBlank() && normalizeAta(input.maintenanceAta) == normalizeAta(record.maintenanceAta)) score += 140
+            if (!input.source.isNullOrBlank() && normalizeToken(input.source) == normalizeToken(record.source)) score += 80
+            if (!input.faultClass.isNullOrBlank() && input.faultClass == record.faultClass) score += 40
+            val recordText = normalizeText(record.maintenanceMessage + " " + record.identifiers.joinToString(" "))
+            (input.identifiers + extractIdentifiers(input.maintenanceMessage)).distinct().forEach {
+                if (containsWholeToken(recordText, normalizeToken(it))) score += 120
+            }
+        } else {
+            val q = input.cockpitMessage?.takeIf { it.isNotBlank() } ?: input.maintenanceMessage
+            if (normalizeText(q) == normalizeText(record.cockpitMessage)) score += 400
+            significantWords(q).forEach { if (containsWholeToken(record.cockpitMessage, it)) score += 30 }
         }
+        if (!input.cockpitMessage.isNullOrBlank() && melTitleCompatible(input.cockpitMessage, record.cockpitMessage)) score += 100
         return score
     }
 
-    private fun resolveTaskFromIndex(record: TsmIndexRecord): LineTsmResolution? {
-        val task = findTaskRow("TSM", record.indexTaskRef) ?: return null
-        val content = taskContent(task)
+    private fun resolveTaskFromIndex(record: TsmIndexRecord, input: FaultInput, cockpitSource: String): LineTsmResolution? {
+        val indexedTask = findTaskRow("TSM", record.indexTaskRef) ?: return null
+        val indexedContent = exactTaskContent(indexedTask)
+        var branch = selectTroubleshootingBranch(indexedContent, input)
+        var activeTask = indexedTask
+        var activeContent = indexedContent
+
+        val redirect = branch?.redirectTaskRef
+        if (!redirect.isNullOrBlank()) {
+            val redirected = findTaskRow("TSM", redirect)
+            if (redirected != null) {
+                activeTask = redirected
+                activeContent = exactTaskContent(redirected)
+                branch = selectTroubleshootingBranch(activeContent, input)
+            }
+        }
+
         return LineTsmResolution(
             indexTaskRef = record.indexTaskRef,
-            taskRef = task.reference,
-            taskTitle = task.title,
+            taskRef = activeTask.reference,
+            taskTitle = activeTask.title,
             indexPage = record.indexPage,
-            taskStartPage = task.startPage,
-            taskEndPage = task.endPage,
+            taskStartPage = activeTask.startPage,
+            taskEndPage = activeTask.endPage,
             cockpitMessage = record.cockpitMessage,
             cockpitAta = record.cockpitAta,
-            maintenanceMessage = record.maintenanceMessage,
-            maintenanceAta = record.maintenanceAta,
+            maintenanceMessage = if (record.maintenanceMessage.isNotBlank()) record.maintenanceMessage else input.maintenanceMessage,
+            maintenanceAta = if (record.maintenanceAta.isNotBlank()) record.maintenanceAta else input.maintenanceAta.orEmpty(),
             source = record.source,
             faultClass = record.faultClass,
-            identifiers = record.identifiers,
-            taskContent = content
+            identifiers = (record.identifiers + input.identifiers).distinct(),
+            taskContent = activeContent,
+            branch = branch,
+            cockpitEffectSource = cockpitSource
         )
     }
 
@@ -361,26 +447,123 @@ class LineAssistantEngine(
         }.getOrNull()
     }
 
-    private fun taskContent(task: TaskRow): String {
-        val out = StringBuilder()
+    private fun exactTaskContent(task: TaskRow): String {
+        val raw = StringBuilder()
         runCatching {
             db.rawQuery(
                 "SELECT content FROM chunks WHERE document_filename=? AND pdf_page BETWEEN ? AND ? ORDER BY pdf_page,chunk_index",
                 arrayOf(task.filename, task.startPage.toString(), task.endPage.toString())
-            ).use { c ->
-                while (c.moveToNext()) {
-                    if (out.length > 180000) break
-                    out.append(c.getString(0)).append('\n')
-                }
-            }
+            ).use { c -> while (c.moveToNext()) raw.append(c.getString(0)).append('\n') }
         }
-        return out.toString().trim()
+        val text = raw.toString()
+        val start = Regex("(?im)^TASK\\s+${Regex.escape(task.reference)}\\s*$").find(text)?.range?.first ?: 0
+        val afterStart = text.substring(start)
+        val nextTask = Regex("(?im)^TASK\\s+\\d{2}-\\d{2}-\\d{2}-\\d{3}-\\d{3}(?:-[A-Z]\\d*)?\\s*$")
+            .find(afterStart, 1)?.range?.first
+        val endMarker = Regex("(?im)^END OF (?:THIS )?TASK\\b.*$").find(afterStart, 1)?.range?.last?.plus(1)
+        val end = listOfNotNull(nextTask, endMarker).minOrNull() ?: afterStart.length
+        return afterStart.substring(0, end).trim()
+    }
+
+    private fun selectTroubleshootingBranch(taskContent: String, input: FaultInput): LineTroubleshootingBranch? {
+        if (taskContent.isBlank()) return null
+        val possible = section(taskContent, "Possible Causes", "Fault Confirmation")
+        val confirmation = section(taskContent, "Fault Confirmation", "Fault Isolation")
+        val isolation = section(taskContent, "Fault Isolation", "Close-up")
+        if (isolation.isBlank()) {
+            val evidence = listOf(possible, confirmation, taskContent).filter { it.isNotBlank() }.joinToString("\n\n")
+            return LineTroubleshootingBranch("FULL TASK PROCEDURE", null, null, possible, confirmation, taskContent, "", evidence)
+        }
+
+        val ids = (input.identifiers + extractIdentifiers(input.maintenanceMessage)).map(::normalizeToken).distinct()
+        val prefixes = ids.mapNotNull { Regex("^(\\d{1,4})GA").find(it)?.groupValues?.getOrNull(1) }.distinct()
+
+        data class Mapping(val paragraph: String?, val redirect: String?, val score: Int, val selector: String)
+        val mappings = mutableListOf<Mapping>()
+        val paraRegex = Regex("(?is)(.{0,520}?)(?:PROCEDURE\\s+IN\\s+)?PARA\\.\\s*4\\s*\\.\\s*A\\s*\\.\\s*\\((\\d+)\\)")
+        paraRegex.findAll(confirmation).forEach { m ->
+            val window = normalizeText(m.groupValues[1])
+            mappings += Mapping(m.groupValues[2], null, mappingScore(window, ids, prefixes), window.takeLast(360))
+        }
+        val redirectRegex = Regex("(?is)(.{0,520}?)\\(REF\\.\\s*TSM\\s+(\\d{2}-\\d{2}-\\d{2}-810-\\d{3})\\)")
+        redirectRegex.findAll(confirmation).forEach { m ->
+            val window = normalizeText(m.groupValues[1])
+            mappings += Mapping(null, m.groupValues[2], mappingScore(window, ids, prefixes), window.takeLast(360))
+        }
+
+        val best = mappings.filter { it.score > 0 }.maxByOrNull { it.score }
+        if (best?.redirect != null) {
+            val evidence = listOf(possible, confirmation).filter { it.isNotBlank() }.joinToString("\n\n")
+            return LineTroubleshootingBranch(best.selector, null, best.redirect, possible, confirmation, "", "", evidence)
+        }
+
+        val paragraph = best?.paragraph
+        if (paragraph.isNullOrBlank()) {
+            val evidence = listOf(possible, confirmation, isolation).filter { it.isNotBlank() }.joinToString("\n\n")
+            return LineTroubleshootingBranch("FULL FAULT ISOLATION — no unique sub-branch selected", null, null, possible, confirmation, isolation, "", evidence)
+        }
+
+        val steps = topLevelSteps(isolation)
+        val selected = steps[paragraph].orEmpty()
+        if (selected.isBlank()) {
+            val evidence = listOf(possible, confirmation, isolation).filter { it.isNotBlank() }.joinToString("\n\n")
+            return LineTroubleshootingBranch("Para. 4.A.($paragraph) selected but step text not isolated", paragraph, null, possible, confirmation, isolation, "", evidence)
+        }
+        val explicitNext = Regex("(?i)DO\\s+(?:THE\\s+)?(?:NEXT\\s+)?STEP\\s*\\((\\d+)\\)")
+            .findAll(selected).mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }.minOrNull()
+        val continuation = if (explicitNext != null) {
+            steps.entries
+                .filter { it.key.toIntOrNull()?.let { n -> n >= explicitNext } == true }
+                .sortedBy { it.key.toIntOrNull() ?: 999 }
+                .joinToString("\n") { it.value }
+        } else ""
+        val evidence = listOf(possible, confirmation, selected, continuation).filter { it.isNotBlank() }.joinToString("\n\n")
+        return LineTroubleshootingBranch(
+            selector = best.selector,
+            paragraph = paragraph,
+            redirectTaskRef = null,
+            possibleCauses = possible,
+            faultConfirmation = confirmation,
+            isolation = selected,
+            continuation = continuation,
+            evidence = evidence
+        )
+    }
+
+    private fun mappingScore(window: String, ids: List<String>, prefixes: List<String>): Int {
+        var score = 0
+        ids.forEach { if (containsWholeToken(window, it)) score += 80 }
+        prefixes.forEach { prefix ->
+            if (Regex("XX\\s*=\\s*[^.\\n]{0,120}\\b${Regex.escape(prefix)}\\b", RegexOption.IGNORE_CASE).containsMatchIn(window)) score += 60
+        }
+        return score
+    }
+
+    private fun topLevelSteps(isolation: String): Map<String, String> {
+        val matches = Regex("(?m)^\\((\\d+)\\)\\s").findAll(isolation).toList()
+        if (matches.isEmpty()) return emptyMap()
+        val out = linkedMapOf<String, String>()
+        matches.forEachIndexed { i, m ->
+            val end = matches.getOrNull(i + 1)?.range?.first ?: isolation.length
+            out[m.groupValues[1]] = isolation.substring(m.range.first, end).trim()
+        }
+        return out
+    }
+
+    private fun section(text: String, startLabel: String, endLabel: String): String {
+        val start = Regex("(?im)^\\d+\\.\\s*\\n${Regex.escape(startLabel)}\\s*$").find(text)
+            ?: Regex("(?im)^${Regex.escape(startLabel)}\\s*$").find(text)
+            ?: return ""
+        val tail = text.substring(start.range.first)
+        val end = Regex("(?im)^\\d+\\.\\s*\\n${Regex.escape(endLabel)}\\s*$").find(tail, 1)
+            ?: Regex("(?im)^${Regex.escape(endLabel)}\\s*$").find(tail, 1)
+        return if (end == null) tail.trim() else tail.substring(0, end.range.first).trim()
     }
 
     private fun resolveMel(cockpitMessage: String?, cockpitAta: String?, rawText: String, aircraftProfile: String): LineMelResolution {
         if (!cockpitMessage.isNullOrBlank()) {
-            val exact = findCompatibleMelEntry(cockpitMessage, cockpitAta)
-            if (exact != null) return melFromEntry(exact, aircraftProfile)
+            val exact = findCompatibleMelEntries(cockpitMessage, cockpitAta)
+            if (exact.isNotEmpty()) return chooseMelVariant(exact, aircraftProfile)
         }
 
         val fallback = findEquipmentMelItem(rawText, cockpitAta)
@@ -392,73 +575,141 @@ class LineAssistantEngine(
                 page = repo.resolve(fallback)?.pdfPage,
                 exactBlock = fallback.snippet,
                 itemRefs = listOf(fallback.reference),
-                note = "No exact MEL ECAM entry was resolved. Equipment-level MEL candidate only; verify original MEL and effectivity."
+                note = "No exact MEL ECAM entry was resolved. Equipment-level MEL candidate only; verify original MEL, conditions and effectivity."
             )
         }
         return LineMelResolution(
-            status = LineDispatchStatus.NO_ENTRY,
-            title = cockpitMessage ?: "No exact MEL entry",
-            ataChapter = cockpitAta?.take(2).orEmpty(),
-            page = null,
-            exactBlock = "",
-            itemRefs = emptyList(),
-            note = "No exact MEL entry confirmed. Absence of a match is never dispatch approval."
+            LineDispatchStatus.NO_ENTRY,
+            cockpitMessage ?: "No exact MEL entry",
+            cockpitAta?.take(2).orEmpty(),
+            null,
+            "",
+            emptyList(),
+            "No exact MEL entry confirmed. Absence of a match is never dispatch approval."
         )
     }
 
-    private fun findCompatibleMelEntry(cockpitMessage: String, cockpitAta: String?): MelEntryRow? {
+    private fun findCompatibleMelEntries(cockpitMessage: String, cockpitAta: String?): List<MelCandidate> {
         val chapter = cockpitAta?.take(2)?.filter(Char::isDigit)
         val rows = mutableListOf<MelEntryRow>()
         val sql = if (!chapter.isNullOrBlank()) {
-            "SELECT mel_entry_id,COALESCE(ata_chapter,''),title,start_pdf_page,end_pdf_page,COALESCE(applicable_to,''),content FROM mel_entries WHERE ata_chapter=?"
+            "SELECT mel_entry_id,COALESCE(ata_chapter,''),title,start_pdf_page,end_pdf_page,content FROM mel_entries WHERE ata_chapter=?"
         } else {
-            "SELECT mel_entry_id,COALESCE(ata_chapter,''),title,start_pdf_page,end_pdf_page,COALESCE(applicable_to,''),content FROM mel_entries"
+            "SELECT mel_entry_id,COALESCE(ata_chapter,''),title,start_pdf_page,end_pdf_page,content FROM mel_entries"
         }
         runCatching {
             db.rawQuery(sql, if (!chapter.isNullOrBlank()) arrayOf(chapter) else null).use { c ->
-                while (c.moveToNext()) {
-                    rows += MelEntryRow("MEL-E-${c.getLong(0)}", c.getString(1), c.getString(2).trim(), c.getInt(3), c.getInt(4), c.getString(5), c.getString(6))
-                }
+                while (c.moveToNext()) rows += MelEntryRow("MEL-E-${c.getLong(0)}", c.getString(1), c.getString(2).trim(), c.getInt(3), c.getInt(4), c.getString(5))
             }
         }
-        return rows.firstOrNull { melTitleCompatible(cockpitMessage, it.title) }
+
+        val dedupe = linkedMapOf<String, MelCandidate>()
+        rows.filter { melTitleCompatible(cockpitMessage, it.title) }.forEach { row ->
+            val block = isolateMelBlock(row.content, row.title).ifBlank { return@forEach }
+            val refs = extractMelItemRefs(block)
+            val candidate = MelCandidate(
+                row = row,
+                block = block,
+                applicability = parseApplicability(block),
+                itemRefs = refs,
+                status = dispatchStatus(block, refs)
+            )
+            val key = normalizeText(block)
+            dedupe.putIfAbsent(key, candidate)
+        }
+        return dedupe.values.toList()
     }
 
-    private fun melFromEntry(row: MelEntryRow, aircraftProfile: String): LineMelResolution {
-        val block = isolateMelBlock(row.content, row.title).ifBlank { row.content }
-        val itemRefs = Regex("(?i)Refer\\s+to\\s+Item\\s+(\\d{2}-\\d{2}-\\d{2})")
-            .findAll(block).map { it.groupValues[1] }.distinct().toList()
-        val upper = block.uppercase(Locale.US)
-        val status = when {
-            upper.contains("NO DISPATCH") && itemRefs.isEmpty() -> LineDispatchStatus.NO_DISPATCH
-            upper.contains("MUST BE OPERATIVE") -> LineDispatchStatus.MUST_BE_OPERATIVE
-            itemRefs.isNotEmpty() -> LineDispatchStatus.CONDITIONAL
-            upper.contains("MAY BE INOPERATIVE") -> LineDispatchStatus.CONDITIONAL
-            else -> LineDispatchStatus.VERIFY_REQUIRED
+    private fun chooseMelVariant(candidates: List<MelCandidate>, aircraftProfile: String): LineMelResolution {
+        val selected: MelCandidate
+        var selectedByProfile = false
+
+        if (candidates.size == 1) {
+            selected = candidates.first()
+            if (aircraftProfile.isNotBlank() && applicabilityMatch(selected.applicability, aircraftProfile) == ApplicabilityMatch.NO_MATCH) {
+                return ambiguousMel(candidates, "Exact MEL alert exists, but its indexed applicability does not match the entered aircraft profile. Verify original MEL/effectivity.")
+            }
+        } else {
+            if (aircraftProfile.isBlank()) {
+                return ambiguousMel(candidates, "Multiple MEL effectivity variants exist for this exact alert. Enter REG/MSN/aircraft variant before any dispatch decision.")
+            }
+            val matched = candidates.filter { applicabilityMatch(it.applicability, aircraftProfile) == ApplicabilityMatch.MATCH }
+            if (matched.size != 1) {
+                return ambiguousMel(candidates, if (matched.isEmpty())
+                    "No unique MEL effectivity variant matches the entered aircraft profile. Verify original MEL."
+                else "More than one MEL effectivity variant matches the entered aircraft profile. Verify original MEL.")
+            }
+            selected = matched.first()
+            selectedByProfile = true
         }
+
+        val conditions = selected.itemRefs.flatMap { ref -> loadMelConditions(ref) }.distinctBy { it.conditionRef }
         val profileNote = if (aircraftProfile.isBlank()) {
             "Effectivity not verified; original MEL applicability must be checked."
         } else {
-            "Aircraft profile: $aircraftProfile. Verify applicability against original MEL wording: ${row.applicableTo.ifBlank { "not indexed" }}."
+            "Aircraft profile: $aircraftProfile. Selected applicability: ${selected.applicability.ifBlank { "not indexed" }}."
         }
-        val note = when (status) {
+        val stateNote = if (conditions.size > 1 && selected.itemRefs.none { it.lastOrNull()?.isLetter() == true }) {
+            " Multiple MEL conditions/sub-items exist; aircraft state must select the applicable condition before dispatch."
+        } else ""
+        val note = when (selected.status) {
             LineDispatchStatus.NO_DISPATCH -> "Exact MEL ECAM block states NO DISPATCH. $profileNote"
             LineDispatchStatus.MUST_BE_OPERATIVE -> "Exact MEL block requires the item to be operative. $profileNote"
-            LineDispatchStatus.CONDITIONAL -> "MEL directs to specific item/conditions. No GO is claimed until all conditions, (O)/(M) procedures and effectivity are verified. $profileNote"
+            LineDispatchStatus.CONDITIONAL -> "MEL directs to specific item/condition(s). No GO is claimed until all limitations, (O)/(M) procedures and effectivity are verified. $profileNote$stateNote"
             LineDispatchStatus.VERIFY_REQUIRED -> "Exact MEL entry found but dispatch wording requires manual verification. $profileNote"
             LineDispatchStatus.NO_ENTRY -> "No exact MEL entry."
         }
-        return LineMelResolution(status, row.title, row.ata, row.page, block, itemRefs, note)
+        return LineMelResolution(
+            selected.status,
+            selected.row.title,
+            selected.row.ata,
+            selected.row.page,
+            selected.block,
+            selected.itemRefs,
+            note,
+            applicability = selected.applicability,
+            conditions = conditions,
+            variantCount = candidates.size,
+            selectedByProfile = selectedByProfile
+        )
+    }
+
+    private fun ambiguousMel(candidates: List<MelCandidate>, note: String): LineMelResolution {
+        val preview = candidates.joinToString("\n\n--- MEL VARIANT ---\n") {
+            "Applicable to: ${it.applicability.ifBlank { "UNKNOWN" }}\n${it.block.take(1800)}"
+        }
+        val first = candidates.first()
+        return LineMelResolution(
+            LineDispatchStatus.VERIFY_REQUIRED,
+            first.row.title,
+            first.row.ata,
+            first.row.page,
+            preview,
+            emptyList(),
+            note,
+            applicability = candidates.joinToString(" | ") { it.applicability.ifBlank { "UNKNOWN" } },
+            conditions = emptyList(),
+            variantCount = candidates.size,
+            selectedByProfile = false
+        )
+    }
+
+    private fun dispatchStatus(block: String, refs: List<String>): LineDispatchStatus {
+        val upper = normalizeText(block)
+        return when {
+            upper.contains("NO DISPATCH") && refs.isEmpty() -> LineDispatchStatus.NO_DISPATCH
+            upper.contains("MUST BE OPERATIVE") -> LineDispatchStatus.MUST_BE_OPERATIVE
+            refs.isNotEmpty() -> LineDispatchStatus.CONDITIONAL
+            upper.contains("MAY BE INOPERATIVE") -> LineDispatchStatus.CONDITIONAL
+            else -> LineDispatchStatus.VERIFY_REQUIRED
+        }
     }
 
     private fun isolateMelBlock(content: String, title: String): String {
         val text = content.replace("\r", "")
-        val regex = Regex("(?im)^ECAM Alert:\\s*(.+?)\\s*$")
-        val matches = regex.findAll(text).toList()
-        val target = normalizeText(title)
+        val matches = Regex("(?im)^ECAM Alert:\\s*(.+?)\\s*$").findAll(text).toList()
         matches.forEachIndexed { i, m ->
-            val header = m.groupValues[1]
-            if (melTitleCompatible(target, header)) {
+            if (melTitleCompatible(title, m.groupValues[1])) {
                 val end = matches.getOrNull(i + 1)?.range?.first ?: text.length
                 return text.substring(m.range.first, end).trim()
             }
@@ -466,39 +717,253 @@ class LineAssistantEngine(
         return ""
     }
 
-    private fun melTitleCompatible(a: String, b: String): Boolean {
-        val left = canonicalMelText(a)
-        val variants = expandMelAlternatives(canonicalMelText(b))
-        return variants.any { canonicalMelText(it) == left }
+    private fun parseApplicability(block: String): String = Regex("(?im)^Applicable to:\\s*(.+?)\\s*$")
+        .find(block)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+
+    private fun extractMelItemRefs(block: String): List<String> {
+        val out = linkedSetOf<String>()
+        val lines = block.lines()
+        lines.forEachIndexed { i, line ->
+            if (line.contains("Refer to Item", true)) {
+                val scope = (listOf(line) + lines.drop(i + 1).take(2).takeWhile { !it.startsWith("ECAM Alert:", true) }).joinToString(" ")
+                Regex("\\b\\d{2}-\\d{2}-\\d{2}(?:-\\d{2})?[A-Z]?\\b").findAll(scope).forEach { out += it.value.uppercase(Locale.US) }
+            }
+        }
+        return out.toList()
     }
 
-    private fun expandMelAlternatives(text: String): Set<String> {
-        var current = linkedSetOf(text)
-        val alt = Regex("([A-Z0-9]+)\\(([A-Z0-9]+)\\)")
-        repeat(6) {
-            val next = linkedSetOf<String>()
-            var changed = false
-            current.forEach { s ->
-                val m = alt.find(s)
-                if (m == null) next += s
-                else {
-                    changed = true
-                    next += s.replaceRange(m.range, m.groupValues[1])
-                    next += s.replaceRange(m.range, m.groupValues[2])
+    private fun loadMelConditions(requestedRef: String): List<LineMelCondition> {
+        val exactExists = scalarInt("SELECT COUNT(*) FROM mel_items WHERE UPPER(COALESCE(mel_ref,''))='${sqlSafe(requestedRef)}'") > 0
+        val base = if (exactExists) requestedRef else requestedRef.removeSuffixLetter()
+        val requestedCondition = if (!exactExists && requestedRef.length > base.length) requestedRef else null
+        val sql = """
+            SELECT COALESCE(mel_ref,''),content,COALESCE(repair_interval,''),COALESCE(nbr_installed,''),
+                   COALESCE(nbr_required,''),COALESCE(placard,'')
+            FROM mel_items WHERE UPPER(COALESCE(mel_ref,''))=? ORDER BY start_pdf_page LIMIT 1
+        """.trimIndent()
+        return runCatching {
+            db.rawQuery(sql, arrayOf(base.uppercase(Locale.US))).use { c ->
+                if (!c.moveToFirst()) return@use emptyList()
+                val content = exactMelItemContent(base, c.getString(1))
+                parseMelConditions(base, content, c.getString(2), c.getString(3), c.getString(4), c.getString(5))
+                    .filter { requestedCondition == null || it.conditionRef.equals(requestedCondition, true) }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun exactMelItemContent(baseRef: String, content: String): String {
+        val lines = content.lines()
+        val start = lines.indexOfFirst { it.trim().equals(baseRef, true) }
+        if (start < 0) return content
+        val basePattern = Regex("^\\d{2}-\\d{2}-\\d{2}(?:-\\d{2})?$")
+        val end = ((start + 1) until lines.size).firstOrNull { idx ->
+            val value = lines[idx].trim()
+            basePattern.matches(value) && !value.equals(baseRef, true)
+        } ?: lines.size
+        return lines.subList(start, end).joinToString("\n")
+    }
+
+    private fun parseMelConditions(baseRef: String, content: String, fallbackInterval: String, fallbackInstalled: String, fallbackRequired: String, fallbackPlacard: String): List<LineMelCondition> {
+        val lines = content.lines().map { it.trim() }.filter { it.isNotBlank() }
+        val marker = Regex("^${Regex.escape(baseRef)}([A-Z])(?:\\s+(.*))?$", RegexOption.IGNORE_CASE)
+        val starts = lines.mapIndexedNotNull { i, line -> marker.find(line)?.let { i to it } }
+        if (starts.isEmpty()) {
+            return listOf(LineMelCondition(baseRef, "", fallbackInterval, fallbackInstalled, fallbackRequired, fallbackPlacard,
+                content.take(2200), emptyList(), emptyList()))
+        }
+        val out = mutableListOf<LineMelCondition>()
+        starts.forEachIndexed { index, pair ->
+            val start = pair.first
+            val match = pair.second
+            val end = starts.getOrNull(index + 1)?.first ?: lines.size
+            val segment = lines.subList(start, end)
+            val conditionRef = baseRef + match.groupValues[1].uppercase(Locale.US)
+            val title = match.groupValues.getOrNull(2).orEmpty().trim()
+            val header = segment.indexOfFirst { it.equals("Repair interval", true) }
+            var interval = fallbackInterval
+            var installed = fallbackInstalled
+            var required = fallbackRequired
+            var placard = fallbackPlacard
+            var afterFields = 1
+            if (header >= 0) {
+                val placardHeader = ((header + 1) until segment.size).firstOrNull { segment[it].equals("Placard", true) }
+                if (placardHeader != null && placardHeader + 4 < segment.size) {
+                    interval = segment[placardHeader + 1]
+                    installed = segment[placardHeader + 2]
+                    required = segment[placardHeader + 3]
+                    placard = segment[placardHeader + 4]
+                    afterFields = placardHeader + 5
                 }
             }
-            current = next
-            if (!changed) return current
+            val refIndex = segment.indexOfFirst { it.equals("Reference(s)", true) }
+            val reqEnd = if (refIndex >= 0) refIndex else segment.size
+            val requirements = segment.subList(afterFields.coerceAtMost(reqEnd), reqEnd).joinToString(" ").trim()
+            val refsText = if (refIndex >= 0) segment.drop(refIndex + 1).joinToString(" ") else ""
+            val procRefs = Regex("(?i)OpsProc\\s+(\\d{2}-\\d{2}-\\d{2}(?:-\\d{2})?[A-Z]?)")
+                .findAll(refsText).map { it.groupValues[1].uppercase(Locale.US) }.distinct().toList()
+            val ammRefs = Regex("(?i)AMM\\s+Task\\s+(\\d{2}-\\d{2}-\\d{2}-\\d{3}-\\d{3}(?:-[A-Z]\\d*)?)")
+                .findAll(refsText).map { it.groupValues[1].uppercase(Locale.US) }.distinct().toList()
+            out += LineMelCondition(conditionRef, title, interval, installed, required, placard, requirements, procRefs, ammRefs)
         }
-        return current
+        return out
     }
 
-    private fun canonicalMelText(value: String): String {
-        return normalizeText(value)
-            .replace(Regex("\\bPACK(\\d)\\b"), "PACK $1")
-            .replace(Regex("\\bENG(\\d)\\b"), "ENG $1")
-            .replace(Regex("\\s+"), " ")
-            .trim()
+    private fun applicabilityMatch(applicability: String, profile: String): ApplicabilityMatch {
+        if (applicability.isBlank() || profile.isBlank()) return ApplicabilityMatch.UNKNOWN
+        val app = normalizeText(applicability)
+        val p = normalizeText(profile)
+        val explicitMsn = Regex("\\bMSN\\s*[:#-]?\\s*0*(\\d{1,4})\\b").find(p)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val modelSuffix = Regex("A340-(\\d{3})").find(p)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val msn = explicitMsn ?: Regex("\\b0*(\\d{1,4})\\b").findAll(p)
+            .mapNotNull { it.groupValues[1].toIntOrNull() }
+            .firstOrNull { it != 340 && it != modelSuffix }
+        val family = when {
+            p.contains("A340-600") || Regex("A340-6\\d{2}").containsMatchIn(p) -> "A340-600"
+            p.contains("A340-300") || Regex("A340-3\\d{2}").containsMatchIn(p) -> "A340-300"
+            p.contains("A340-200") || Regex("A340-2\\d{2}").containsMatchIn(p) -> "A340-200"
+            else -> null
+        }
+
+        if (app.contains("ALL EXCEPT MSN")) {
+            if (msn == null) return ApplicabilityMatch.UNKNOWN
+            return if (msnInExpression(msn, app.substringAfter("ALL EXCEPT MSN"))) ApplicabilityMatch.NO_MATCH else ApplicabilityMatch.MATCH
+        }
+        if (app == "ALL" || app.startsWith("ALL;")) return ApplicabilityMatch.MATCH
+
+        val hasMsn = app.contains("MSN")
+        val hasFamily = listOf("A340-200", "A340-300", "A340-600").any { app.contains(it) }
+        var evidence = false
+        if (hasMsn && msn != null) {
+            evidence = true
+            if (msnInExpression(msn, app)) return ApplicabilityMatch.MATCH
+        }
+        if (hasFamily && family != null) {
+            evidence = true
+            if (app.contains(family)) return ApplicabilityMatch.MATCH
+        }
+        return if (evidence) ApplicabilityMatch.NO_MATCH else ApplicabilityMatch.UNKNOWN
+    }
+
+    private fun msnInExpression(msn: Int, text: String): Boolean {
+        Regex("0*(\\d{1,4})\\s*-\\s*0*(\\d{1,4})").findAll(text).forEach {
+            val a = it.groupValues[1].toIntOrNull() ?: return@forEach
+            val b = it.groupValues[2].toIntOrNull() ?: return@forEach
+            if (msn in minOf(a, b)..maxOf(a, b)) return true
+        }
+        Regex("(?<![-\\d])0*(\\d{1,4})(?![-\\d])").findAll(text).forEach {
+            if (it.groupValues[1].toIntOrNull() == msn) return true
+        }
+        return false
+    }
+
+    private fun supportHits(tsm: LineTsmResolution, input: FaultInput): List<SearchHit> {
+        val out = mutableListOf<SearchHit>()
+        val seen = linkedSetOf<String>()
+        fun add(h: SearchHit?) {
+            h ?: return
+            val key = "${h.entityType}|${h.entityId}|${h.manual}|${h.reference}"
+            if (seen.add(key)) out += h
+        }
+
+        val scoped = tsm.branch?.evidence?.takeIf { it.isNotBlank() } ?: tsm.taskContent
+        val upper = scoped.uppercase(Locale.US)
+        Regex("\\b(?:REF\\.\\s*)?AMM(?:\\s+TASK)?\\s+(\\d{2}-\\d{2}-\\d{2}-\\d{3}-\\d{3}(?:-[A-Z]\\d*)?)\\b")
+            .findAll(upper).map { it.groupValues[1] }.distinct().take(18).forEach { taskHit(it, "AMM")?.let(::add) }
+        Regex("\\b(?:REF\\.\\s*)?ASM\\s+(\\d{2}-\\d{2}-\\d{2})\\b")
+            .findAll(upper).map { it.groupValues[1] }.distinct().take(8).forEach { asmHit(it)?.let(::add) }
+        Regex("\\b(?:REF\\.\\s*)?AWM\\s+(\\d{2}-\\d{2}-\\d{2})\\b")
+            .findAll(upper).map { it.groupValues[1] }.distinct().take(8).forEach { awmDiagramHit(it)?.let(::add) }
+        Regex("\\b(?:REF\\.\\s*)?ESPM\\s+(\\d{2}-\\d{2}-\\d{2})\\b")
+            .findAll(upper).map { it.groupValues[1] }.distinct().take(6).forEach { espmHit(it)?.let(::add) }
+
+        val ids = linkedSetOf<String>()
+        ids += input.identifiers
+        ids += extractIdentifiers(input.maintenanceMessage)
+        ids += tsm.identifiers
+        ids += extractIdentifiers(scoped).take(12)
+        ids.filter { it.length >= 3 }.take(18).forEach { id ->
+            awmIdentifierHit(id)?.let(::add)
+            ipcIdentifierHit(id)?.let(::add)
+        }
+        return out.take(32)
+    }
+
+    private fun taskHit(ref: String, manual: String): SearchHit? {
+        val row = findTaskRow(manual, ref) ?: return null
+        return SearchHit("task", row.taskId, manual, row.reference, row.title, exactTaskContent(row).take(2000), -4500.0)
+    }
+
+    private fun asmHit(ref: String): SearchHit? = runCatching {
+        db.rawQuery("SELECT sheet_id,schematic_ref,COALESCE(title,''),COALESCE(short_title,'') FROM asm_sheets WHERE UPPER(schematic_ref)=? OR UPPER(schematic_ref) LIKE ? ORDER BY pdf_page LIMIT 1",
+            arrayOf(ref.uppercase(Locale.US), "${ref.uppercase(Locale.US)}%" )).use { c ->
+            if (!c.moveToFirst()) return@use null
+            SearchHit("asm_sheet", c.getString(0), "ASM", c.getString(1), c.getString(2).ifBlank { c.getString(3) }, "Referenced by selected TSM branch", -4300.0)
+        }
+    }.getOrNull()
+
+    private fun awmDiagramHit(ref: String): SearchHit? = runCatching {
+        db.rawQuery("SELECT awm_diagram_id,diagram_ref,COALESCE(title,'') FROM awm_diagrams WHERE UPPER(diagram_ref)=? OR UPPER(diagram_ref) LIKE ? ORDER BY awm_diagram_id LIMIT 1",
+            arrayOf(ref.uppercase(Locale.US), "${ref.uppercase(Locale.US)}%" )).use { c ->
+            if (!c.moveToFirst()) return@use null
+            SearchHit("awm_diagram", c.getLong(0).toString(), "AWM", c.getString(1), c.getString(2), "Referenced by selected TSM branch", -4200.0)
+        }
+    }.getOrNull()
+
+    private fun espmHit(ref: String): SearchHit? = runCatching {
+        db.rawQuery("SELECT section_id,section_ref,COALESCE(title,''),COALESCE(first_page_text,'') FROM espm_sections WHERE UPPER(section_ref)=? LIMIT 1",
+            arrayOf(ref.uppercase(Locale.US))).use { c ->
+            if (!c.moveToFirst()) return@use null
+            SearchHit("espm_section", c.getString(0), "ESPM", c.getString(1), c.getString(2), c.getString(3).take(1000), -4150.0)
+        }
+    }.getOrNull()
+
+    private fun awmIdentifierHit(id: String): SearchHit? = runCatching {
+        db.rawQuery("SELECT i.id,i.token,i.kind,p.pdf_page FROM awm_identifiers i JOIN pages p ON p.page_id=i.page_id WHERE UPPER(i.token)=? ORDER BY p.pdf_page LIMIT 1",
+            arrayOf(normalizeToken(id))).use { c ->
+            if (!c.moveToFirst()) return@use null
+            SearchHit("awm_identifier", c.getLong(0).toString(), "AWM", c.getString(1), c.getString(2), "Exact AWM identifier • PDF page ${c.getInt(3)}", -4100.0)
+        }
+    }.getOrNull()
+
+    private fun ipcIdentifierHit(id: String): SearchHit? = runCatching {
+        db.rawQuery("SELECT COALESCE(fin,''),part_number,COALESCE(nomenclature,''),COALESCE(raw_block,'') FROM ipc_items WHERE UPPER(COALESCE(fin,''))=? OR UPPER(part_number)=? ORDER BY pdf_page LIMIT 1",
+            arrayOf(normalizeToken(id), normalizeToken(id))).use { c ->
+            if (!c.moveToFirst()) return@use null
+            val ref = c.getString(0).ifBlank { c.getString(1) }
+            SearchHit("part_number", c.getString(1), "IPC", ref, c.getString(2), c.getString(3).take(1200), -4000.0)
+        }
+    }.getOrNull()
+
+    private fun melEntryHit(cockpitMessage: String?, mel: LineMelResolution): SearchHit? {
+        if (mel.page == null || cockpitMessage.isNullOrBlank() || mel.variantCount > 1 && !mel.selectedByProfile) return null
+        val row = findCompatibleMelEntries(cockpitMessage, mel.ataChapter).firstOrNull { it.row.page == mel.page } ?: return null
+        return SearchHit("mel_entry", row.row.id, "MEL", row.row.title, "Exact MEL ECAM entry • ${row.row.title}", mel.exactBlock.take(2000), -5000.0)
+    }
+
+    private fun melItemHit(requestedRef: String): SearchHit? {
+        val exactCount = scalarInt("SELECT COUNT(*) FROM mel_items WHERE UPPER(COALESCE(mel_ref,''))='${sqlSafe(requestedRef)}'")
+        val base = if (exactCount > 0) requestedRef else requestedRef.removeSuffixLetter()
+        return runCatching {
+            db.rawQuery("SELECT mel_item_id,COALESCE(mel_ref,''),title,content FROM mel_items WHERE UPPER(COALESCE(mel_ref,''))=? ORDER BY start_pdf_page LIMIT 1",
+                arrayOf(base.uppercase(Locale.US))).use { c ->
+                if (!c.moveToFirst()) return@use null
+                SearchHit("mel_item", "MEL-I-${c.getLong(0)}", "MEL", c.getString(1), c.getString(2), exactMelItemContent(base, c.getString(3)).take(2200), -4800.0)
+            }
+        }.getOrNull()
+    }
+
+    private fun melProcedureHits(conditionRef: String): List<SearchHit> {
+        val base = conditionRef.removeSuffixLetter()
+        val out = mutableListOf<SearchHit>()
+        runCatching {
+            db.rawQuery("SELECT mel_procedure_id,COALESCE(procedure_ref,''),title,content FROM mel_procedures WHERE UPPER(COALESCE(procedure_ref,'')) LIKE ? ORDER BY start_pdf_page LIMIT 8",
+                arrayOf("${base.uppercase(Locale.US)}%" )).use { c ->
+                while (c.moveToNext()) {
+                    out += SearchHit("mel_procedure", "MEL-P-${c.getLong(0)}", "MEL", c.getString(1), "Operational Procedure • ${c.getString(2)}", c.getString(3).take(2200), -4700.0)
+                }
+            }
+        }
+        return out
     }
 
     private fun findEquipmentMelItem(rawText: String, cockpitAta: String?): SearchHit? {
@@ -510,221 +975,142 @@ class LineAssistantEngine(
         val terms = significantWords(rawText).take(5)
         if (terms.isEmpty()) return null
         val rows = mutableListOf<SearchHit>()
-        val sql = "SELECT mel_item_id,mel_ref,title,start_pdf_page,content FROM mel_items WHERE ata_chapter=?"
         runCatching {
-            db.rawQuery(sql, arrayOf(chapter)).use { c ->
+            db.rawQuery("SELECT mel_item_id,mel_ref,title,content FROM mel_items WHERE ata_chapter=?", arrayOf(chapter)).use { c ->
                 while (c.moveToNext()) {
-                    val hay = normalizeText(c.getString(2) + " " + c.getString(4))
+                    val hay = normalizeText(c.getString(2) + " " + c.getString(3))
                     val matches = terms.count { containsWholeToken(hay, it) }
-                    if (matches >= 2) {
-                        rows += SearchHit("mel_item", "MEL-I-${c.getLong(0)}", "MEL", c.getString(1).orEmpty(), c.getString(2), c.getString(4).take(1200), -1000.0 - matches)
-                    }
+                    if (matches >= 2) rows += SearchHit("mel_item", "MEL-I-${c.getLong(0)}", "MEL", c.getString(1).orEmpty(), c.getString(2), c.getString(3).take(1200), -1000.0 - matches)
                 }
             }
         }
         return rows.sortedBy { it.score }.firstOrNull()
     }
 
-    private fun melEntryHit(cockpitMessage: String?, mel: LineMelResolution): SearchHit? {
-        if (mel.page == null || cockpitMessage.isNullOrBlank()) return null
-        val row = findCompatibleMelEntry(cockpitMessage, mel.ataChapter) ?: return null
-        return SearchHit("mel_entry", row.id, "MEL", row.title, "Exact MEL ECAM entry • ${row.title}", mel.exactBlock.take(1800), -5000.0)
-    }
+    private fun buildSummary(input: FaultInput, mel: LineMelResolution, tsm: LineTsmResolution?, profile: String): String = buildString {
+        append("LINE ASSISTANT 1.1 • DATABASE-NATIVE WORKFLOW\n\n")
+        input.parsedFault?.let { append("PFR STRUCTURED RECORD\n").append(it.displaySummary()).append("\n\n") }
 
-    private fun melItemHit(ref: String): SearchHit? {
-        val sql = "SELECT mel_item_id,COALESCE(mel_ref,''),title,content FROM mel_items WHERE UPPER(COALESCE(mel_ref,''))=? ORDER BY start_pdf_page LIMIT 1"
-        return runCatching {
-            db.rawQuery(sql, arrayOf(ref.uppercase(Locale.US))).use { c ->
-                if (!c.moveToFirst()) return@use null
-                SearchHit("mel_item", "MEL-I-${c.getLong(0)}", "MEL", c.getString(1), c.getString(2), c.getString(3).take(1800), -4800.0)
-            }
-        }.getOrNull()
-    }
+        append("1 • MEL / DISPATCH\n")
+        append("Entry: ").append(mel.title).append('\n')
+        append("Status: ").append(when (mel.status) {
+            LineDispatchStatus.NO_DISPATCH -> "NO DISPATCH"
+            LineDispatchStatus.MUST_BE_OPERATIVE -> "MUST BE OPERATIVE"
+            LineDispatchStatus.CONDITIONAL -> "CONDITIONAL — VERIFY MEL CONDITION"
+            LineDispatchStatus.VERIFY_REQUIRED -> "VERIFY ORIGINAL MEL / EFFECTIVITY"
+            LineDispatchStatus.NO_ENTRY -> "NO EXACT MEL ENTRY CONFIRMED"
+        }).append('\n')
+        mel.page?.let { append("Original MEL PDF page: ").append(it).append('\n') }
+        if (mel.applicability.isNotBlank()) append("Applicability: ").append(mel.applicability).append('\n')
+        if (mel.variantCount > 1) append("Effectivity variants: ").append(mel.variantCount).append('\n')
+        if (mel.itemRefs.isNotEmpty()) append("Referenced MEL item(s): ").append(mel.itemRefs.joinToString(", ")).append('\n')
+        mel.conditions.forEach { c ->
+            append("  ").append(c.conditionRef)
+            if (c.title.isNotBlank()) append(" — ").append(c.title)
+            append(" | Interval ").append(c.repairInterval.ifBlank { "?" })
+            append(" | Installed ").append(c.nbrInstalled.ifBlank { "?" })
+            append(" | Required ").append(c.nbrRequired.ifBlank { "?" })
+            append(" | Placard ").append(c.placard.ifBlank { "?" }).append('\n')
+        }
+        append(mel.note).append("\n\n")
 
-    private fun melProcedureHits(itemRef: String): List<SearchHit> {
-        val prefix = itemRef.uppercase(Locale.US)
-        val out = mutableListOf<SearchHit>()
-        runCatching {
-            db.rawQuery(
-                "SELECT mel_procedure_id,COALESCE(procedure_ref,''),title,content FROM mel_procedures WHERE UPPER(COALESCE(procedure_ref,'')) LIKE ? ORDER BY start_pdf_page LIMIT 6",
-                arrayOf("$prefix%")
-            ).use { c ->
-                while (c.moveToNext()) {
-                    out += SearchHit("mel_procedure", "MEL-P-${c.getLong(0)}", "MEL", c.getString(1), "Operational Procedure • ${c.getString(2)}", c.getString(3).take(1800), -4700.0)
+        append("2 • TSM TROUBLESHOOTING\n")
+        if (tsm == null) {
+            append("Exact TSM Warnings/Malfunction mapping NOT RESOLVED. Broad TSM lists are suppressed.\n")
+        } else {
+            append("Index mapping: ").append(tsm.indexTaskRef).append('\n')
+            append("Verified task: ").append(tsm.taskRef).append(" — ").append(tsm.taskTitle).append('\n')
+            append("Complete task PDF range: ").append(tsm.taskStartPage).append('-').append(tsm.taskEndPage).append('\n')
+            append("Cockpit effect: ").append(tsm.cockpitAta).append(" • ").append(tsm.cockpitMessage)
+                .append(" [").append(tsm.cockpitEffectSource).append("]\n")
+            if (tsm.maintenanceMessage.isNotBlank()) append("Maintenance fault: ").append(tsm.maintenanceAta).append(" • ").append(tsm.maintenanceMessage).append('\n')
+            tsm.branch?.let { b ->
+                append("Selected troubleshooting path: ")
+                when {
+                    !b.redirectTaskRef.isNullOrBlank() -> append("redirect to ").append(b.redirectTaskRef)
+                    !b.paragraph.isNullOrBlank() -> append("Para. 4.A.(").append(b.paragraph).append(')')
+                    else -> append(b.selector)
                 }
+                append('\n')
+                if (b.selector.isNotBlank()) append("Branch basis: ").append(b.selector.take(360)).append('\n')
             }
         }
-        return out
-    }
 
-    private fun supportHits(tsm: LineTsmResolution, input: FaultInput): List<SearchHit> {
-        val out = mutableListOf<SearchHit>()
-        val seen = linkedSetOf<String>()
-        fun add(h: SearchHit?) {
-            h ?: return
-            val k = "${h.entityType}|${h.entityId}|${h.manual}|${h.reference}"
-            if (seen.add(k)) out += h
-        }
-
-        val text = tsm.taskContent.uppercase(Locale.US)
-        val ammRefs = Regex("\\bAMM(?:\\s+TASK)?\\s+(\\d{2}-\\d{2}-\\d{2}-\\d{3}-\\d{3}(?:-[A-Z]\\d*)?)\\b")
-            .findAll(text).map { it.groupValues[1] }.distinct().take(14).toList()
-        ammRefs.forEach { ref -> taskHit(ref, "AMM")?.let(::add) }
-
-        val asmRefs = Regex("\\bASM\\s+(\\d{2}-\\d{2}-\\d{2})\\b")
-            .findAll(text).map { it.groupValues[1] }.distinct().take(8).toList()
-        asmRefs.forEach { ref -> asmHit(ref)?.let(::add) }
-
-        val awmRefs = Regex("\\bAWM\\s+(\\d{2}-\\d{2}-\\d{2})\\b")
-            .findAll(text).map { it.groupValues[1] }.distinct().take(6).toList()
-        awmRefs.forEach { ref -> awmDiagramHit(ref)?.let(::add) }
-
-        val ids = linkedSetOf<String>()
-        ids += input.identifiers
-        ids += extractIdentifiers(input.maintenanceMessage)
-        ids += tsm.identifiers
-        ids += extractIdentifiers(tsm.taskContent).take(14)
-        ids.filter { it.length >= 3 }.take(16).forEach { id ->
-            awmIdentifierHit(id)?.let(::add)
-            ipcIdentifierHit(id)?.let(::add)
-        }
-        return out.take(28)
-    }
-
-    private fun taskHit(ref: String, manual: String): SearchHit? {
-        val row = findTaskRow(manual, ref) ?: return null
-        return SearchHit("task", row.taskId, manual, row.reference, row.title, taskContent(row).take(1800), -4500.0)
-    }
-
-    private fun asmHit(ref: String): SearchHit? {
-        val sql = """
-            SELECT a.sheet_id,a.schematic_ref,COALESCE(a.title,''),COALESCE(a.short_title,'')
-            FROM asm_sheets a
-            WHERE UPPER(a.schematic_ref)=? OR UPPER(a.schematic_ref) LIKE ?
-            ORDER BY a.pdf_page LIMIT 1
-        """.trimIndent()
-        return runCatching {
-            db.rawQuery(sql, arrayOf(ref.uppercase(Locale.US), "${ref.uppercase(Locale.US)}%" )).use { c ->
-                if (!c.moveToFirst()) return@use null
-                SearchHit("asm_sheet", c.getString(0), "ASM", c.getString(1), c.getString(2).ifBlank { c.getString(3) }, "Referenced by exact TSM task", -4300.0)
-            }
-        }.getOrNull()
-    }
-
-    private fun awmDiagramHit(ref: String): SearchHit? {
-        val sql = "SELECT awm_diagram_id,diagram_ref,COALESCE(title,'') FROM awm_diagrams WHERE UPPER(diagram_ref)=? OR UPPER(diagram_ref) LIKE ? ORDER BY awm_diagram_id LIMIT 1"
-        return runCatching {
-            db.rawQuery(sql, arrayOf(ref.uppercase(Locale.US), "${ref.uppercase(Locale.US)}%" )).use { c ->
-                if (!c.moveToFirst()) return@use null
-                SearchHit("awm_diagram", c.getLong(0).toString(), "AWM", c.getString(1), c.getString(2), "Referenced by exact TSM task", -4200.0)
-            }
-        }.getOrNull()
-    }
-
-    private fun awmIdentifierHit(id: String): SearchHit? {
-        val sql = """
-            SELECT i.id,i.token,i.kind,p.pdf_page,d.filename
-            FROM awm_identifiers i JOIN pages p ON p.page_id=i.page_id JOIN documents d ON d.document_id=p.document_id
-            WHERE UPPER(i.token)=? ORDER BY p.pdf_page LIMIT 1
-        """.trimIndent()
-        return runCatching {
-            db.rawQuery(sql, arrayOf(normalizeToken(id))).use { c ->
-                if (!c.moveToFirst()) return@use null
-                SearchHit("awm_identifier", c.getLong(0).toString(), "AWM", c.getString(1), c.getString(2), "Exact AWM identifier • PDF page ${c.getInt(3)}", -4100.0)
-            }
-        }.getOrNull()
-    }
-
-    private fun ipcIdentifierHit(id: String): SearchHit? {
-        val sql = """
-            SELECT ipc_item_id,COALESCE(catalog_ref,''),COALESCE(fin,''),part_number,COALESCE(nomenclature,''),COALESCE(raw_block,'')
-            FROM ipc_items
-            WHERE UPPER(COALESCE(fin,''))=? OR UPPER(part_number)=?
-            ORDER BY pdf_page LIMIT 1
-        """.trimIndent()
-        return runCatching {
-            db.rawQuery(sql, arrayOf(normalizeToken(id), normalizeToken(id))).use { c ->
-                if (!c.moveToFirst()) return@use null
-                val ref = c.getString(2).ifBlank { c.getString(3) }
-                SearchHit("part_number", c.getString(3), "IPC", ref, c.getString(4), c.getString(5).take(1200), -4000.0)
-            }
-        }.getOrNull()
-    }
-
-    private fun buildSummary(input: FaultInput, mel: LineMelResolution, tsm: LineTsmResolution?, profile: String): String {
-        return buildString {
-            append("LINE ASSISTANT • VERIFIED WORKFLOW\n\n")
-            input.parsedFault?.let { append("PFR STRUCTURED RECORD\n").append(it.displaySummary()).append("\n\n") }
-
-            append("1 • MEL / DISPATCH\n")
-            append("Entry: ").append(mel.title).append('\n')
-            append("Status: ").append(
-                when (mel.status) {
-                    LineDispatchStatus.NO_DISPATCH -> "NO DISPATCH"
-                    LineDispatchStatus.MUST_BE_OPERATIVE -> "MUST BE OPERATIVE"
-                    LineDispatchStatus.CONDITIONAL -> "CONDITIONAL — VERIFY ALL MEL CONDITIONS"
-                    LineDispatchStatus.VERIFY_REQUIRED -> "VERIFY ORIGINAL MEL ENTRY"
-                    LineDispatchStatus.NO_ENTRY -> "NO EXACT MEL ENTRY CONFIRMED"
-                }
-            ).append('\n')
-            mel.page?.let { append("Original MEL PDF page: ").append(it).append('\n') }
-            if (mel.itemRefs.isNotEmpty()) append("Referenced MEL item(s): ").append(mel.itemRefs.joinToString(", ")).append('\n')
-            append(mel.note).append("\n\n")
-
-            append("2 • TSM TROUBLESHOOTING\n")
-            if (tsm == null) {
-                append("Exact TSM Warnings/Malfunction index mapping NOT RESOLVED. Broad TSM lists are suppressed.\n")
-            } else {
-                append("Index match: ").append(tsm.maintenanceAta).append(" • ").append(tsm.maintenanceMessage).append('\n')
-                append("Source/Class: ").append(tsm.source).append(" / ").append(tsm.faultClass).append('\n')
-                append("Ref. TASK: ").append(tsm.indexTaskRef).append('\n')
-                append("Verified task: ").append(tsm.taskRef).append(" — ").append(tsm.taskTitle).append('\n')
-                append("Complete task range: PDF pages ").append(tsm.taskStartPage).append('-').append(tsm.taskEndPage).append('\n')
-                append("Cockpit effect from TSM index: ").append(tsm.cockpitAta).append(" • ").append(tsm.cockpitMessage).append('\n')
-            }
-
-            append("\n3 • EFFECTIVITY\n")
-            append(if (profile.isBlank()) "NOT VERIFIED — enter REG/MSN/effectivity before applying maintenance or dispatch action." else "Aircraft profile: $profile — verify each source applicability before use.")
-            append("\n\nSOURCE MANUALS REMAIN AUTHORITATIVE.")
-        }
+        append("\n3 • EFFECTIVITY\n")
+        append(if (profile.isBlank()) "NOT VERIFIED — enter REG/MSN/aircraft variant before applying maintenance or dispatch action." else "Aircraft profile: $profile — verify each original source applicability before use.")
+        append("\n\nSOURCE MANUALS REMAIN AUTHORITATIVE.")
     }
 
     private fun buildSafety(mel: LineMelResolution, tsm: LineTsmResolution?, profile: String): String = buildString {
         append("MEL STATUS: ").append(mel.status.name)
+        append("\nMEL VARIANTS: ").append(mel.variantCount)
         append("\nTSM EXACT: ").append(tsm?.taskRef ?: "NOT RESOLVED")
+        append("\nTSM BRANCH: ").append(tsm?.branch?.paragraph?.let { "4.A.($it)" } ?: tsm?.branch?.selector ?: "NOT SELECTED")
         append("\nEFFECTIVITY: ").append(if (profile.isBlank()) "NOT VERIFIED" else profile)
-        append("\nAI MAY EXPLAIN VERIFIED EVIDENCE ONLY; IT MUST NOT CHANGE MEL STATUS OR TSM TASK REFERENCE.")
+        append("\nAI MAY EXPLAIN VERIFIED EVIDENCE ONLY; IT MUST NOT CHANGE MEL STATUS, EFFECTIVITY OR TSM TASK/BRANCH.")
     }
 
-    private fun buildEvidencePacket(input: FaultInput, mel: LineMelResolution, tsm: LineTsmResolution?, hits: List<SearchHit>): String {
-        return buildString {
-            append("[E1 MEL EXACT BLOCK]\n")
-            append(mel.exactBlock.ifBlank { mel.note }.take(3000)).append("\n\n")
-            if (tsm != null) {
-                append("[E2 TSM INDEX MAPPING]\n")
-                append("Cockpit: ${tsm.cockpitAta} ${tsm.cockpitMessage}\n")
-                append("Fault: ${tsm.maintenanceAta} ${tsm.maintenanceMessage}\n")
-                append("Source: ${tsm.source} Class: ${tsm.faultClass} Identifiers: ${tsm.identifiers.joinToString(", ")}\n")
-                append("Ref TASK: ${tsm.indexTaskRef} -> Verified ${tsm.taskRef}\n\n")
-                append("[E3 VERIFIED TSM TASK ${tsm.taskRef}]\n")
-                append(tsm.taskContent.take(8500)).append("\n\n")
+    private fun buildEvidencePacket(input: FaultInput, mel: LineMelResolution, tsm: LineTsmResolution?, hits: List<SearchHit>): String = buildString {
+        append("[E1 MEL EXACT BLOCK]\n").append(mel.exactBlock.ifBlank { mel.note }.take(5000)).append("\n\n")
+        if (mel.conditions.isNotEmpty()) {
+            append("[E2 MEL SELECTED/AVAILABLE CONDITIONS]\n")
+            mel.conditions.forEach { c ->
+                append(c.conditionRef).append(" ").append(c.title).append(" | Interval=").append(c.repairInterval)
+                    .append(" Installed=").append(c.nbrInstalled).append(" Required=").append(c.nbrRequired)
+                    .append(" Placard=").append(c.placard).append('\n')
+                append(c.requirements.take(1800)).append("\n\n")
             }
-            hits.filter { it.manual !in setOf("MEL", "TSM") }.take(8).forEachIndexed { i, h ->
-                append("[E${i + 4} ${h.manual} ${h.reference}]\n")
-                append(h.title).append('\n').append(h.snippet.take(900)).append("\n\n")
-            }
-            append("[INPUT]\n").append(input.rawText.take(1200))
         }
+        if (tsm != null) {
+            append("[E3 TSM INDEX MAPPING]\n")
+            append("Cockpit: ${tsm.cockpitAta} ${tsm.cockpitMessage}\n")
+            append("Fault: ${tsm.maintenanceAta} ${tsm.maintenanceMessage}\n")
+            append("Source: ${tsm.source} Class: ${tsm.faultClass} Identifiers: ${tsm.identifiers.joinToString(", ")}\n")
+            append("Ref TASK: ${tsm.indexTaskRef} -> Active verified ${tsm.taskRef}\n\n")
+            append("[E4 SELECTED TROUBLESHOOTING BRANCH]\n")
+            append((tsm.branch?.evidence ?: tsm.taskContent).take(18000)).append("\n\n")
+        }
+        hits.filter { it.manual !in setOf("MEL", "TSM") }.take(12).forEachIndexed { i, h ->
+            append("[E${i + 5} ${h.manual} ${h.reference}]\n")
+            append(h.title).append('\n').append(h.snippet.take(1200)).append("\n\n")
+        }
+        append("[INPUT]\n").append(input.rawText.take(1600))
     }
+
+    private fun melTitleCompatible(a: String, b: String): Boolean {
+        val left = canonicalMelText(a)
+        return expandMelAlternatives(canonicalMelText(b)).any { canonicalMelText(it) == left }
+    }
+
+    private fun expandMelAlternatives(text: String): Set<String> {
+        var current = linkedSetOf(text)
+        val alt = Regex("([A-Z0-9]+)\\(([A-Z0-9]+)\\)")
+        repeat(6) {
+            val next = linkedSetOf<String>()
+            var changed = false
+            current.forEach { s ->
+                val m = alt.find(s)
+                if (m == null) next += s else {
+                    changed = true
+                    next += s.replaceRange(m.range, m.groupValues[1])
+                    next += s.replaceRange(m.range, m.groupValues[2])
+                }
+            }
+            current = next
+            if (!changed) return current
+        }
+        return current
+    }
+
+    private fun canonicalMelText(value: String): String = normalizeText(value)
+        .replace(Regex("\\bPACK(\\d)\\b"), "PACK $1")
+        .replace(Regex("\\bENG(\\d)\\b"), "ENG $1")
+        .replace(Regex("\\s+"), " ").trim()
 
     private fun significantWords(text: String): List<String> {
         val stop = setOf("ATA", "REF", "MESSAGE", "TYPE", "SOURCE", "CLASS", "FAULT", "FAULTS", "THE", "OF", "A", "AN", "AND", "STATUS")
-        return Regex("[A-Z0-9]+")
-            .findAll(normalizeText(text))
-            .map { it.value }
-            .filter { it.length >= 2 && it !in stop && !it.matches(Regex("\\d{2,6}")) }
-            .distinct()
-            .toList()
+        return Regex("[A-Z0-9]+").findAll(normalizeText(text)).map { it.value }
+            .filter { it.length >= 2 && it !in stop && !it.matches(Regex("\\d{2,6}")) }.distinct().toList()
     }
 
     private fun extractIdentifiers(text: String): List<String> {
@@ -732,22 +1118,11 @@ class LineAssistantEngine(
         val out = linkedSetOf<String>()
         Regex("\\b\\d{1,4}[A-Z]{1,4}\\d{0,4}\\b").findAll(upper).forEach { out += it.value }
         Regex("\\b(?:LGCIU\\d|BMC\\d(?:-\\d)?)\\b").findAll(upper).forEach { out += it.value }
-        return out.filterNot { it.matches(Regex("\\d+")) }.take(24)
+        return out.filterNot { it.matches(Regex("\\d+")) }.take(28)
     }
 
-    private fun baseFaultMessage(text: String): String {
-        return normalizeText(text)
-            .replace(Regex("\\([^)]*\\)"), " ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-    }
-
-    private fun normalizeText(text: String): String = text
-        .uppercase(Locale.US)
-        .replace('\u00A0', ' ')
-        .replace(Regex("\\s+"), " ")
-        .trim()
-
+    private fun baseFaultMessage(text: String): String = normalizeText(text).replace(Regex("\\([^)]*\\)"), " ").replace(Regex("\\s+"), " ").trim()
+    private fun normalizeText(text: String): String = text.uppercase(Locale.US).replace('\u00A0', ' ').replace(Regex("\\s+"), " ").trim()
     private fun cleanLine(text: String): String = normalizeText(text)
     private fun normalizeToken(text: String): String = normalizeText(text).replace(" ", "")
     private fun normalizeAta(text: String): String = text.filter(Char::isDigit).take(6)
@@ -758,6 +1133,17 @@ class LineAssistantEngine(
         val t = Regex.escape(normalizeText(token))
         return Regex("(?<![A-Z0-9])$t(?![A-Z0-9])").containsMatchIn(h)
     }
+
+    private fun String.removeSuffixLetter(): String {
+        val m = Regex("^(\\d{2}-\\d{2}-\\d{2}(?:-\\d{2})?)[A-Z]$").find(this.uppercase(Locale.US))
+        return m?.groupValues?.getOrNull(1) ?: this
+    }
+
+    private fun scalarInt(sql: String): Int = runCatching {
+        db.rawQuery(sql, null).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+    }.getOrDefault(0)
+
+    private fun sqlSafe(value: String): String = value.uppercase(Locale.US).replace("'", "''")
 
     override fun close() = db.close()
 }
