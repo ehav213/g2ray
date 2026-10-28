@@ -1,4 +1,4 @@
-name: Build A340 Technical Assistant V7 APK
+name: Build Line Assistant APK
 
 on:
   push:
@@ -47,10 +47,10 @@ jobs:
         run: |
           unzip -l a340-app/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
       - name: Rename APK
-        run: cp a340-app/app/build/outputs/apk/debug/app-debug.apk A340TechnicalAssistant-V7.apk
+        run: cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.0.0.apk
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: A340TechnicalAssistant-V7
-          path: A340TechnicalAssistant-V7.apk
+          name: LineAssistant-1.0.0
+          path: LineAssistant-1.0.0.apk
           if-no-files-found: error
