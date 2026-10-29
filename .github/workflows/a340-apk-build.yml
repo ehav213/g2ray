@@ -28,6 +28,9 @@ jobs:
       - name: Apply Line Assistant 1.3.2 cropped-PFR-row version metadata
         working-directory: a340-app
         run: python lineassistant_v132_version_patch.py
+      - name: Apply Line Assistant 1.3.3 PFR metadata/source cleanup
+        working-directory: a340-app
+        run: python lineassistant_v133_output_cleanup_patch.py
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -62,10 +65,10 @@ jobs:
         run: |
           unzip -l a340-app/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
       - name: Rename APK
-        run: cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.3.2.apk
+        run: cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.3.3.apk
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LineAssistant-1.3.2
-          path: LineAssistant-1.3.2.apk
+          name: LineAssistant-1.3.3
+          path: LineAssistant-1.3.3.apk
           if-no-files-found: error
