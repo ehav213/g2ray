@@ -16,6 +16,9 @@ jobs:
       - name: Apply Line Assistant 1.1.1 resolver patch
         working-directory: a340-app
         run: python lineassistant_v111_runtime_patch.py
+      - name: Apply Line Assistant 1.2 PFR geometry patch
+        working-directory: a340-app
+        run: python lineassistant_v120_pfr_patch.py
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -50,10 +53,10 @@ jobs:
         run: |
           unzip -l a340-app/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
       - name: Rename APK
-        run: cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.1.1.apk
+        run: cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.2.0.apk
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LineAssistant-1.1.1
-          path: LineAssistant-1.1.1.apk
+          name: LineAssistant-1.2.0
+          path: LineAssistant-1.2.0.apk
           if-no-files-found: error
