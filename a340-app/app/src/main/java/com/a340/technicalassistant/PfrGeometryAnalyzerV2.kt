@@ -3,15 +3,16 @@ package com.a340.technicalassistant
 import android.graphics.Rect
 import com.google.mlkit.vision.text.Text
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.max
 
 /**
  * Fail-closed Airbus A340 PFR table parser.
  *
- * Row boundaries are anchored by the UTC column, because every printed PFR event has its own
- * UTC/flight-phase cell while cockpit ATA and maintenance ATA can sit at different vertical
- * positions inside the same row. No flattened-text fallback is allowed here: if table geometry
- * is not reliable, no troubleshooting event is emitted and no TSM task may be guessed.
+ * Full-page PFR photos use the printed table headers to establish the three logical columns.
+ * Cropped single-row/multi-row photos are also accepted when geometry can be proven from three
+ * independent anchors: a 4-digit cockpit ATA on the left, a valid UTC in the middle, and a
+ * 6-digit maintenance ATA on the right. No flattened-text fallback is used for troubleshooting.
  */
 object PfrGeometryAnalyzerV2 {
     private data class OcrLine(val text: String, val box: Rect) {
@@ -30,33 +31,51 @@ object PfrGeometryAnalyzerV2 {
             .filter { it.text.length >= 2 }
             .sortedWith(compareBy<OcrLine> { it.box.top }.thenBy { it.box.left })
 
-        if (lines.size < 8) return emptyResult(raw)
+        if (lines.size < 6) return emptyResult(raw)
+
+        val typicalHeight = medianHeight(lines)
+        val pageLeft = lines.minOf { it.box.left }
+        val pageRight = lines.maxOf { it.box.right }
+        val pageWidth = max(1, pageRight - pageLeft)
 
         val cockpitHeader = lines.firstOrNull { it.text.contains("COCKPIT") && it.text.contains("EFFECT") }
         val faultHeader = lines.firstOrNull { it.text == "FAULTS" || it.text.matches(Regex("^\\d+\\s+FAULTS$")) }
         val middleHeaders = lines.filter { it.text == "UTC" || it.text.contains("FLIGHT PHASE") }
 
-        // A PFR photo must expose enough of the real table header to establish column geometry.
-        if (cockpitHeader == null || faultHeader == null || middleHeaders.isEmpty()) return emptyResult(raw)
+        val hasFullHeader = cockpitHeader != null && faultHeader != null && middleHeaders.isNotEmpty()
+        val headerBottom: Int
+        val columns: Columns
 
-        val headerBottom = listOf(cockpitHeader.box.bottom, faultHeader.box.bottom, middleHeaders.maxOf { it.box.bottom }).max()
-        val pageLeft = lines.minOf { it.box.left }
-        val pageRight = lines.maxOf { it.box.right }
-        val pageWidth = max(1, pageRight - pageLeft)
-        val middleCx = middleHeaders.map { it.cx }.average().toFloat()
-
-        var cockpitEnd = (cockpitHeader.cx + middleCx) / 2f
-        var faultStart = (middleCx + faultHeader.cx) / 2f
-        cockpitEnd = cockpitEnd.coerceIn(pageLeft + pageWidth * 0.22f, pageLeft + pageWidth * 0.42f)
-        faultStart = faultStart.coerceIn(pageLeft + pageWidth * 0.42f, pageLeft + pageWidth * 0.64f)
-        if (cockpitEnd >= faultStart - pageWidth * 0.04f) {
-            cockpitEnd = pageLeft + pageWidth * 0.31f
-            faultStart = pageLeft + pageWidth * 0.50f
+        if (hasFullHeader) {
+            val ch = cockpitHeader!!
+            val fh = faultHeader!!
+            headerBottom = listOf(
+                ch.box.bottom,
+                fh.box.bottom,
+                middleHeaders.maxOf { it.box.bottom }
+            ).max()
+            val middleCx = middleHeaders.map { it.cx }.average().toFloat()
+            var cockpitEnd = (ch.cx + middleCx) / 2f
+            var faultStart = (middleCx + fh.cx) / 2f
+            cockpitEnd = cockpitEnd.coerceIn(pageLeft + pageWidth * 0.22f, pageLeft + pageWidth * 0.42f)
+            faultStart = faultStart.coerceIn(pageLeft + pageWidth * 0.42f, pageLeft + pageWidth * 0.64f)
+            if (cockpitEnd >= faultStart - pageWidth * 0.04f) {
+                cockpitEnd = pageLeft + pageWidth * 0.31f
+                faultStart = pageLeft + pageWidth * 0.50f
+            }
+            columns = Columns(cockpitEnd, faultStart)
+        } else {
+            // Cropped PFR row: infer the same three logical columns from independent content anchors.
+            // This remains fail-closed: all three anchor families must exist in the expected order.
+            columns = inferColumnsFromAnchors(lines, pageLeft, pageWidth) ?: return emptyResult(raw)
+            headerBottom = (lines.minOf { it.box.top } - typicalHeight).coerceAtLeast(0)
         }
-        val columns = Columns(cockpitEnd, faultStart)
 
-        val typicalHeight = medianHeight(lines)
-        val body = lines.filter { it.box.top >= headerBottom - typicalHeight / 2 }
+        val body = if (hasFullHeader) {
+            lines.filter { it.box.top >= headerBottom - typicalHeight / 2 }
+        } else {
+            lines
+        }
 
         // UTC is the row anchor. Repeated times are retained when their vertical positions differ.
         val utcAnchors = body
@@ -65,7 +84,7 @@ object PfrGeometryAnalyzerV2 {
             .sortedBy { it.first.cy }
             .fold(mutableListOf<Pair<OcrLine, String>>()) { acc, item ->
                 val prev = acc.lastOrNull()
-                if (prev == null || kotlin.math.abs(prev.first.cy - item.first.cy) > typicalHeight * 0.65f) acc += item
+                if (prev == null || abs(prev.first.cy - item.first.cy) > typicalHeight * 0.65f) acc += item
                 acc
             }
 
@@ -100,7 +119,9 @@ object PfrGeometryAnalyzerV2 {
             val maintAtaDigits = fault.firstNotNullOfOrNull { parseAtaDigits(it.text)?.takeIf { d -> d.length == 6 } }
             if (maintAtaDigits != null) {
                 val faultClass = fault.firstNotNullOfOrNull(::parseClass)
-                val persistence = fault.firstOrNull { normalize(it.text) in setOf("HARD", "INTERMITTENT", "PERMANENT", "TRANSIENT") }?.text
+                val persistence = fault.firstOrNull {
+                    normalize(it.text) in setOf("HARD", "INTERMITTENT", "PERMANENT", "TRANSIENT")
+                }?.text
                 val source = fault.firstNotNullOfOrNull { parseSource(it.text) }
                 val metaStart = fault
                     .filter { isSourceOrIdentifierLine(it.text) }
@@ -110,8 +131,6 @@ object PfrGeometryAnalyzerV2 {
                 val identifiers = parseIdentifiers(fault, metaStart)
                 val message = parseFaultMessage(fault, maintAtaDigits, metaStart)
 
-                // The maintenance ATA and a real message are mandatory. Missing class/source is allowed
-                // only for later deterministic disambiguation; a weak row never invents missing fields.
                 if (message.isNotBlank()) {
                     faults += PostFlightAnalyzer.Fault(
                         number = faults.size + 1,
@@ -171,6 +190,36 @@ object PfrGeometryAnalyzerV2 {
         faults = emptyList()
     )
 
+    private fun inferColumnsFromAnchors(lines: List<OcrLine>, pageLeft: Int, pageWidth: Int): Columns? {
+        val cockpitXs = mutableListOf<Float>()
+        val utcXs = mutableListOf<Float>()
+        val faultXs = mutableListOf<Float>()
+
+        lines.forEach { line ->
+            val ata = parseAtaDigits(line.text)
+            when (ata?.length) {
+                4 -> cockpitXs += line.cx
+                6 -> faultXs += line.cx
+            }
+            if (parseUtc(line.text) != null) utcXs += line.cx
+        }
+
+        val cockpitX = median(cockpitXs) ?: return null
+        val utcX = median(utcXs) ?: return null
+        val faultX = median(faultXs) ?: return null
+
+        if (!(cockpitX < utcX && utcX < faultX)) return null
+        if (utcX - cockpitX < pageWidth * 0.10f) return null
+        if (faultX - utcX < pageWidth * 0.045f) return null
+
+        var cockpitEnd = (cockpitX + utcX) / 2f
+        var faultStart = (utcX + faultX) / 2f
+        cockpitEnd = cockpitEnd.coerceIn(pageLeft + pageWidth * 0.20f, pageLeft + pageWidth * 0.46f)
+        faultStart = faultStart.coerceIn(pageLeft + pageWidth * 0.40f, pageLeft + pageWidth * 0.68f)
+        if (cockpitEnd >= faultStart - pageWidth * 0.035f) return null
+        return Columns(cockpitEnd, faultStart)
+    }
+
     private fun parseCockpitMessage(lines: List<OcrLine>, ataDigits: String?): String? {
         if (ataDigits == null) return null
         val sorted = lines.sortedWith(compareBy<OcrLine> { it.box.top }.thenBy { it.box.left })
@@ -182,7 +231,11 @@ object PfrGeometryAnalyzerV2 {
             val cleaned = stripCockpitTypePrefix(line.text)
             if (cleaned.isNotBlank() && !isCockpitType(cleaned)) parts += cleaned
         }
-        return parts.joinToString(" ").replace(Regex("\\s+"), " ").trim().ifBlank { null }
+        return parts.joinToString(" ")
+            .replace(Regex("\\bL[IL|1]G\\b"), "L/G")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .ifBlank { null }
     }
 
     private fun parseFaultMessage(lines: List<OcrLine>, ataDigits: String, metaStart: Float): String {
@@ -328,6 +381,13 @@ object PfrGeometryAnalyzerV2 {
         .replace('\u00A0', ' ')
         .replace(Regex("\\s+"), " ")
         .trim()
+
+    private fun median(values: List<Float>): Float? {
+        if (values.isEmpty()) return null
+        val sorted = values.sorted()
+        val mid = sorted.size / 2
+        return if (sorted.size % 2 == 1) sorted[mid] else (sorted[mid - 1] + sorted[mid]) / 2f
+    }
 
     private fun medianHeight(lines: List<OcrLine>): Int {
         val s = lines.map { it.height }.sorted()
