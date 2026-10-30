@@ -46,6 +46,9 @@ jobs:
       - name: Apply Line Assistant 1.3.7 editable structured PFR form
         working-directory: a340-app
         run: python lineassistant_v137_pfr_structured_editor_patch.py
+      - name: Prepare Line Assistant 1.3.8 parser patch matcher
+        working-directory: a340-app
+        run: python lineassistant_v138_patchfix.py
       - name: Apply Line Assistant 1.3.8 Airbus ECAM/CMS entry-point classification
         working-directory: a340-app
         run: python lineassistant_v138_entrypoint_classification_patch.py
