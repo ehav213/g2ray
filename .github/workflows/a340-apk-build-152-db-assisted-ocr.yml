@@ -1,0 +1,203 @@
+name: Build Line Assistant 1.5.2 Database-Assisted OCR
+
+on:
+  push:
+    branches: [ lineassistant-152-db-assisted-ocr ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout 1.5.2 branch
+        uses: actions/checkout@v4
+
+      - name: Apply Line Assistant patch chain through 1.4.5
+        working-directory: a340-app
+        shell: bash
+        run: |
+          python lineassistant_v111_runtime_patch.py
+          python lineassistant_v120_pfr_patch.py
+          python lineassistant_v130_pfr_strict_patch.py
+          python lineassistant_v131_compile_fix.py
+          python lineassistant_v132_version_patch.py
+          python lineassistant_v133_output_cleanup_patch.py
+          python lineassistant_v134_task_range_patch.py
+          python lineassistant_v135_pfr_element_split_patch.py
+          python lineassistant_v135_compile_fix.py
+          python lineassistant_v136_universal_pfr_patch.py
+          python lineassistant_v137_pfr_structured_editor_patch.py
+          python lineassistant_v138_patchfix.py
+          python lineassistant_v138_entrypoint_classification_patch.py
+          python lineassistant_v139_exact_ecam_classification_patch.py
+          python lineassistant_v140_cms_index_match_patch.py
+          python lineassistant_v141_sections_manual_crop_patch.py
+          python lineassistant_v141_compile_fix.py
+          python lineassistant_v142_unified_ios_patch.py
+          python lineassistant_v142_xml_fix.py
+          python lineassistant_v143_crop_confirm_toolbar_patch.py
+          python lineassistant_v144_cockpit_only_pfr_patch.py
+          python lineassistant_v145_cms_candidate_selector_patch.py
+
+      - name: Apply 1.4.6 AWM IPC support and legacy multi-pass OCR patch
+        run: python a340-app/lineassistant_v146_ocr_awm_ipc_patch.py
+
+      - name: Apply 1.4.7 approved exact launcher icon
+        working-directory: a340-app
+        run: python lineassistant_v147_exact_icon_patch.py
+
+      - name: Apply 1.4.8 restore exact 1.4.5 PFR OCR path
+        working-directory: a340-app
+        run: python lineassistant_v148_restore_145_ocr_patch.py
+
+      - name: Apply 1.4.9 layout-safe PFR parser fix
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import base64, gzip, re, subprocess
+          s = Path('a340-app/lineassistant_v149_ocr_layout_fix.py').read_text()
+          m = re.search(r'PATCH_B64\s*=\s*"([A-Za-z0-9+/=]+)"', s)
+          assert m, '1.4.9 embedded patch payload missing'
+          patch = gzip.decompress(base64.b64decode(m.group(1)))
+          subprocess.run(['git', 'apply', '--whitespace=nowarn', '--directory=a340-app', '-'], input=patch, check=True)
+          print('Applied LineAssistant 1.4.9 patch to explicit a340-app worktree')
+          PY
+
+      - name: Verify 1.4.9 layout safety baseline
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          root = Path('a340-app')
+          activity = (root/'app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt').read_text()
+          analyzer = (root/'app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt').read_text()
+          m = re.search(r'    private fun ocr\(uri: Uri\) \{.*?(?=\n    private fun handlePfrOcr\(result: Text\) \{)', activity, re.S)
+          assert m, 'OCR block missing'
+          b = m.group(0)
+          assert 'InputImage.fromFilePath(this, uri)' in b
+          assert 'PfrImagePreprocessor' not in b and 'runPfrOcrPipeline' not in b
+          assert 'parseUtc(w.text) == null' in analyzer
+          assert 'explicitCmsLabelX' in analyzer
+          assert 'canonicalPersistenceToken' in analyzer
+          print('PASS 1.4.9 direct OCR + layout-safe baseline')
+          PY
+
+      - name: Apply 1.5.2 database-assisted OCR patch
+        run: python a340-app/lineassistant_v152_db_assisted_ocr_patch.py
+
+      - name: Verify 1.5.2 safety invariants
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          root = Path('a340-app')
+          gradle = (root/'app/build.gradle.kts').read_text()
+          activity = (root/'app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt').read_text()
+          corrector = (root/'app/src/main/java/com/a340/technicalassistant/PfrDatabaseOcrCorrector.kt').read_text()
+          scorer = (root/'app/src/main/java/com/a340/technicalassistant/PfrOcrScoring.kt').read_text()
+          test = (root/'app/src/test/java/com/a340/technicalassistant/PfrOcrScoringTest.kt').read_text()
+          engine = (root/'app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt').read_text()
+          checks = {
+              'versionCode 52': 'versionCode = 52' in gradle,
+              'versionName 1.5.2': 'versionName = "1.5.2"' in gradle,
+              '1.5.2 engine banner': 'LINE ASSISTANT 1.5.2' in engine,
+              'DB validator called': 'PfrDatabaseOcrCorrector(activeRepo).correct(parsed, result)' in activity,
+              'DB validation off UI thread': 'io.execute {' in activity and 'VALIDATING CMS TOKENS AGAINST TECHNICAL DATABASE' in activity,
+              'raw OCR audit visible': 'RAW OCR:' in activity,
+              'confidence used': 'element.confidence' in corrector,
+              'strong consensus guarded': 'strongConsensus' in corrector,
+              'ATA + source context required': 'ataMatch && sourceMatch' in corrector,
+              'scoring engine present': 'object PfrOcrScoring' in scorer,
+              'real PFR confusion regression': 'PES CTRL (ERK) / DIRE (102RH)' in test and 'PES CTRL(8MK)/DIR2(102RH)' in test,
+              'negative regression present': 'unrelatedDatabaseMessageIsRejected' in test,
+          }
+          # Database-assisted code is forbidden from overwriting closed-vocabulary/geometry fields.
+          copy_blocks = re.findall(r'fault\.copy\((.*?)\)', corrector, re.S)
+          forbidden = ['utc', 'flightPhase', 'flightPhaseCode', 'ata', 'ataFull', 'faultClass', 'persistence', 'cockpitAta']
+          for field in forbidden:
+              bad = any(re.search(r'\b' + re.escape(field) + r'\s*=', block) for block in copy_blocks)
+              checks['DB cannot overwrite ' + field] = not bad
+          failed = [name for name, ok in checks.items() if not ok]
+          for name, ok in checks.items(): print(('PASS ' if ok else 'FAIL ') + name)
+          if failed: raise SystemExit('1.5.2 safety verification failed: ' + ', '.join(failed))
+          print('All 1.5.2 static safety invariants verified')
+          PY
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android 35 SDK
+        shell: bash
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Route Technical Master through bundled FTS5 SQLite
+        shell: bash
+        run: |
+          FILE='a340-app/app/src/main/java/com/a340/technicalassistant/SearchRepository.kt'
+          grep -q 'import android.database.sqlite.SQLiteDatabase' "$FILE"
+          sed -i 's/import android.database.sqlite.SQLiteDatabase/import com.a340.technicalassistant.db.FtsSQLiteDatabase as SQLiteDatabase/' "$FILE"
+          grep -q 'import com.a340.technicalassistant.db.FtsSQLiteDatabase as SQLiteDatabase' "$FILE"
+
+      - name: Run OCR scoring regression tests
+        working-directory: a340-app
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:testDebugUnitTest --stacktrace
+
+      - name: Prepare clean 1.5.2 source snapshot
+        shell: bash
+        run: |
+          rm -rf a340-app/.gradle a340-app/app/build a340-app/build a340-app/.idea
+          rm -f a340-app/local.properties
+
+      - name: Upload 1.5.2 source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.5.2-Source
+          path: a340-app/
+          if-no-files-found: error
+          include-hidden-files: true
+
+      - name: Build debug APK
+        working-directory: a340-app
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify bundled SQLite native library
+        shell: bash
+        run: unzip -l a340-app/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
+
+      - name: Rename and checksum APK
+        shell: bash
+        run: |
+          cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.5.2.apk
+          sha256sum LineAssistant-1.5.2.apk | tee LineAssistant-1.5.2.sha256
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.5.2
+          path: |
+            LineAssistant-1.5.2.apk
+            LineAssistant-1.5.2.sha256
+          if-no-files-found: error
