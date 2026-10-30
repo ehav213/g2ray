@@ -1,4 +1,4 @@
-name: Build Line Assistant 1.5.0 Consolidated
+name: Build Line Assistant 1.5.1 OCR + Verified Support Sources
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: lineassistant-a340-v7-local-llm
+  group: lineassistant-a340-v7-local-llm-151
   cancel-in-progress: true
 
 jobs:
@@ -29,13 +29,17 @@ jobs:
         shell: bash
         run: |
           ! grep -E 'run: python lineassistant_v[0-9].*patch\.py' .github/workflows/a340-apk-build.yml
-          grep -q 'versionName = "1.5.0"' a340-app/app/build.gradle.kts
+          grep -q 'versionName = "1.5.1"' a340-app/app/build.gradle.kts
+          grep -q 'versionCode = 51' a340-app/app/build.gradle.kts
+          grep -q 'PfrOcrPipeline.recognize(this, uri)' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt
+          grep -q 'Broad ATA/wiring guessing is suppressed.' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt
+          grep -q 'Broad parts guessing is suppressed.' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt
           grep -q 'FtsSQLiteDatabase as SQLiteDatabase' a340-app/app/src/main/java/com/a340/technicalassistant/SearchRepository.kt
 
-      - name: Upload immutable 1.5.0 source snapshot
+      - name: Upload immutable 1.5.1 source snapshot
         uses: actions/upload-artifact@v4
         with:
-          name: LineAssistant-1.5.0-Source
+          name: LineAssistant-1.5.1-Source
           path: a340-app/
           if-no-files-found: error
           include-hidden-files: true
@@ -73,14 +77,14 @@ jobs:
       - name: Create APK and SHA256
         shell: bash
         run: |
-          cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.5.0.apk
-          sha256sum LineAssistant-1.5.0.apk | tee LineAssistant-1.5.0.sha256
+          cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.5.1.apk
+          sha256sum LineAssistant-1.5.1.apk | tee LineAssistant-1.5.1.sha256
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LineAssistant-1.5.0
+          name: LineAssistant-1.5.1
           path: |
-            LineAssistant-1.5.0.apk
-            LineAssistant-1.5.0.sha256
+            LineAssistant-1.5.1.apk
+            LineAssistant-1.5.1.sha256
           if-no-files-found: error
