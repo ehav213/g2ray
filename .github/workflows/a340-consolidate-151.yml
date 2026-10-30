@@ -41,13 +41,9 @@ jobs:
       - name: Verify patch integrity
         run: git diff --check
 
-      - name: Commit consolidated direct source
+      - name: Commit consolidated direct source only
         shell: bash
         run: |
-          if [ -z "$(git status --porcelain)" ]; then
-            echo "No source changes to commit."
-            exit 0
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add \
@@ -55,9 +51,12 @@ jobs:
             a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt \
             a340-app/app/src/main/java/com/a340/technicalassistant/PfrOcrPipeline.kt \
             a340-app/app/build.gradle.kts \
-            a340-app/verify_lineassistant_regressions.py \
-            .github/workflows/a340-apk-build.yml
+            a340-app/verify_lineassistant_regressions.py
+          if git diff --cached --quiet; then
+            echo "No source changes to commit."
+            exit 0
+          fi
           git commit -m "Line Assistant 1.5.1: deskew OCR and verified AWM IPC"
           git push origin HEAD:a340-v7-local-llm
 
-# trigger: consolidate verified direct source
+# trigger: source-only consolidation to avoid workflow-token permission restriction
