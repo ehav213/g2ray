@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: lineassistant-a340-v7-local-llm-151
+  group: lineassistant-a340-v7-local-llm
   cancel-in-progress: true
 
 jobs:
