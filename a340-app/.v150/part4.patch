@@ -1,0 +1,114 @@
+             val compact = normalizeText(value).replace(Regex("[^A-Z]"), "")
+             return when {
+-                compact.contains("MAINTENANCESTATUS") || compact.contains("MAINTSTATUS") -> "MAINTENANCESTATUS"
++                compact.contains("MAINTENANCESTATUS") || compact.contains("MAINTSTATUS") || compact.contains("STSMAINTENANCE") -> "MAINTENANCESTATUS"
+                 compact.contains("EWDWARNING") || compact.contains("ECAMWARNING") -> "EWDWARNING"
+                 compact.contains("STSINOPSYSTEM") -> "STSINOPSYSTEM"
+                 compact.contains("PFDFLAG") -> "PFDFLAG"
+@@ -967,21 +1034,6 @@
+             val exact = findCompatibleMelEntries(cockpitMessage, cockpitAta)
+             if (exact.isNotEmpty()) return chooseMelVariant(exact, aircraftProfile)
+         }
+-
+-        val fallback = findEquipmentMelItem(rawText, cockpitAta)
+-        if (fallback != null) {
+-            val conditions = loadMelConditions(fallback.reference, aircraftProfile)
+-            return LineMelResolution(
+-                status = LineDispatchStatus.VERIFY_REQUIRED,
+-                title = fallback.reference + " — " + fallback.title,
+-                ataChapter = fallback.reference.take(2),
+-                page = repo.resolve(fallback)?.pdfPage,
+-                exactBlock = fallback.snippet,
+-                itemRefs = listOf(fallback.reference),
+-                note = "No exact MEL ECAM entry was resolved. Equipment-level MEL candidate only; verify original MEL, select the applicable condition, (O)/(M) procedures and effectivity.",
+-                conditions = conditions
+-            )
+-        }
+         return LineMelResolution(
+             LineDispatchStatus.NO_ENTRY,
+             cockpitMessage ?: "No exact MEL entry",
+@@ -989,7 +1041,7 @@
+             null,
+             "",
+             emptyList(),
+-            "No exact MEL entry confirmed. Absence of a match is never dispatch approval."
++            "No exact MEL cockpit/ECAM entry confirmed. Equipment-level guessing is disabled; absence of a match is never dispatch approval."
+         )
+     }
+ 
+@@ -1299,8 +1351,8 @@
+ 
+         val ids = linkedSetOf<String>()
+         ids += input.identifiers
+-        ids += extractIdentifiers(input.maintenanceMessage)
+-        ids += tsm.identifiers
++        val scopedNorm = normalizeText(scoped)
++        ids += tsm.identifiers.filter { containsWholeToken(scopedNorm, normalizeToken(it)) }
+         ids.filter { it.length >= 3 }.take(18).forEach { id ->
+             awmIdentifierHit(id)?.let(::add)
+             ipcIdentifierHit(id)?.let(::add)
+@@ -1386,7 +1438,7 @@
+         return out
+     }
+ 
+-    private fun findEquipmentMelItem(rawText: String, cockpitAta: String?): SearchHit? {
++    private fun legacyFindEquipmentMelItemDisabled(rawText: String, cockpitAta: String?): SearchHit? {
+         val upper = rawText.uppercase(Locale.US)
+         if (upper.contains("APU")) return melItemHit("49-10-01")
+         val chapter = cockpitAta?.take(2)?.filter(Char::isDigit)
+@@ -1407,8 +1459,8 @@
+         return rows.sortedBy { it.score }.firstOrNull()
+     }
+ 
+-    private fun buildSummary(input: FaultInput, mel: LineMelResolution, tsm: LineTsmResolution?, profile: String, candidates: List<LineTsmCandidate>): String = buildString {
+-        append("LINE ASSISTANT 1.4.5 • VERIFIED CMS CANDIDATE SELECTION\n\n")
++    private fun buildSummary(input: FaultInput, mel: LineMelResolution, tsm: LineTsmResolution?, profile: String, candidates: List<LineTsmCandidate>, state: LineTsmState, note: String): String = buildString {
++        append("LINE ASSISTANT 1.5.0 • CONSOLIDATED FAIL-CLOSED RESOLVER\n\n")
+         input.parsedFault?.let { append("PFR STRUCTURED RECORD\n").append(it.displaySummary()).append("\n\n") }
+ 
+         append("1 • MEL / DISPATCH\n")
+@@ -1438,18 +1490,24 @@
+ 
+         append("2 • TSM TROUBLESHOOTING\n")
+         if (candidates.isNotEmpty()) {
+-            append("COCKPIT ENTRY VERIFIED • CMS SELECTION REQUIRED.\n")
+-            append("Select one verified CMS fault message below before a TSM task is opened.\n")
+-            append("Candidates: ").append(candidates.size).append('\n')
++            append(when (state) {
++                LineTsmState.NEEDS_CMS -> "COCKPIT / STS ENTRY VERIFIED • ACTUAL CMS FAULT REQUIRED.\n"
++                LineTsmState.AMBIGUOUS -> "TSM MATCH REMAINS AMBIGUOUS • MORE VERIFIED AIRCRAFT DATA REQUIRED.\n"
++                else -> "TSM CANDIDATES REQUIRE VERIFICATION.\n"
++            })
++            append(note).append('\n')
++            append("Candidate index records: ").append(candidates.size).append('\n')
+             candidates.forEachIndexed { i, c ->
+                 append(i + 1).append(") ").append(c.maintenanceAta).append(" • ")
+                     .append(c.maintenanceMessage)
+                 if (c.source.isNotBlank()) append(" • Source ").append(c.source)
+                 if (c.faultClass.isNotBlank()) append(" • Class ").append(c.faultClass)
++                if (c.applicability.isNotBlank()) append(" • Applies ").append(c.applicability)
+                 append(" • ").append(c.taskRef).append('\n')
+             }
+         } else if (tsm == null) {
+-            append("Exact TSM Warnings/Malfunction mapping NOT RESOLVED. Broad TSM lists are suppressed.\n")
++            append("Exact TSM Warnings/Malfunction mapping NOT RESOLVED. Broad TSM lists and direct-task guessing are suppressed.\n")
++            if (note.isNotBlank()) append(note).append('\n')
+         } else {
+             append("Index mapping: ").append(tsm.indexTaskRef).append('\n')
+             append("Verified task: ").append(tsm.taskRef).append(" — ").append(tsm.taskTitle).append('\n')
+diff -ruN '--exclude=*.zip' la145/app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt la150/app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt
+--- la145/app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt	2026-10-30 14:02:20.000000000 +0000
++++ la150/app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt	2026-10-30 16:51:51.015514073 +0000
+@@ -333,6 +333,7 @@
+         val candidate = lines.map { normalizeSpacing(it.text) }.firstOrNull(::isCockpitTypeLine) ?: return null
+         val compact = candidate.replace(Regex("[^A-Z]"), "")
+         return when {
++            compact.contains("STSMAINTENANCE") -> "STS-MAINTENANCE"
+             compact.contains("MAINTENANCESTATUS") || editDistance(compact, "MAINTENANCESTATUS") <= 3 -> "MAINTENANCE STATUS"
+             compact.contains("STSINOPSYSTEM") -> "STS-INOP SYSTEM"
+             compact.contains("EWDWARNING") || compact.contains("ECAMWARNING") -> "EWD WARNING(S)"
+@@ -526,6 +527,7 @@
+     private fun isCockpitTypeLine(text: String): Boolean {
+         val t = normalize(text)
+         val compact = t.replace(Regex("[^A-Z]"), "")
++        if (compact.contains("STSMAINTENANCE")) return true
