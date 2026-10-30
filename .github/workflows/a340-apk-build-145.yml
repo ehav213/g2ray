@@ -1,0 +1,134 @@
+name: Build Line Assistant 1.4.5
+
+on:
+  push:
+    branches: [ a340-v7-local-llm ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Apply Line Assistant 1.1.1 resolver patch
+        working-directory: a340-app
+        run: python lineassistant_v111_runtime_patch.py
+      - name: Apply Line Assistant 1.2 PFR geometry patch
+        working-directory: a340-app
+        run: python lineassistant_v120_pfr_patch.py
+      - name: Apply Line Assistant 1.3.1 strict PFR and slash OCR patch
+        working-directory: a340-app
+        run: python lineassistant_v130_pfr_strict_patch.py
+      - name: Apply Line Assistant 1.3.1 compile escape fix
+        working-directory: a340-app
+        run: python lineassistant_v131_compile_fix.py
+      - name: Apply Line Assistant 1.3.2 cropped-PFR-row version metadata
+        working-directory: a340-app
+        run: python lineassistant_v132_version_patch.py
+      - name: Apply Line Assistant 1.3.3 PFR metadata/source cleanup
+        working-directory: a340-app
+        run: python lineassistant_v133_output_cleanup_patch.py
+      - name: Apply Line Assistant 1.3.4 complete TSM/AMM task range metadata
+        working-directory: a340-app
+        run: python lineassistant_v134_task_range_patch.py
+      - name: Apply Line Assistant 1.3.5 PFR element geometry and exact TSM recovery
+        working-directory: a340-app
+        run: python lineassistant_v135_pfr_element_split_patch.py
+      - name: Apply Line Assistant 1.3.5 Kotlin compile fix
+        working-directory: a340-app
+        run: python lineassistant_v135_compile_fix.py
+      - name: Apply Line Assistant 1.3.6 universal geometry-first PFR parser
+        working-directory: a340-app
+        run: python lineassistant_v136_universal_pfr_patch.py
+      - name: Apply Line Assistant 1.3.7 editable structured PFR form
+        working-directory: a340-app
+        run: python lineassistant_v137_pfr_structured_editor_patch.py
+      - name: Prepare Line Assistant 1.3.8 parser patch matcher
+        working-directory: a340-app
+        run: python lineassistant_v138_patchfix.py
+      - name: Apply Line Assistant 1.3.8 Airbus ECAM/CMS entry-point classification
+        working-directory: a340-app
+        run: python lineassistant_v138_entrypoint_classification_patch.py
+      - name: Apply Line Assistant 1.3.9 exact MEL ECAM classification
+        working-directory: a340-app
+        run: python lineassistant_v139_exact_ecam_classification_patch.py
+      - name: Apply Line Assistant 1.4.0 robust CMS TSM index matching
+        working-directory: a340-app
+        run: python lineassistant_v140_cms_index_match_patch.py
+      - name: Apply Line Assistant 1.4.1 crop-first OCR
+        working-directory: a340-app
+        run: python lineassistant_v141_sections_manual_crop_patch.py
+      - name: Apply Line Assistant 1.4.1 nullable camera URI compile fix
+        working-directory: a340-app
+        run: python lineassistant_v141_compile_fix.py
+      - name: Apply Line Assistant 1.4.2 unified iOS-style first-entry screen
+        working-directory: a340-app
+        run: python lineassistant_v142_unified_ios_patch.py
+      - name: Apply Line Assistant 1.4.2 XML entity fix
+        working-directory: a340-app
+        run: python lineassistant_v142_xml_fix.py
+      - name: Apply Line Assistant 1.4.3 visible crop confirmation toolbar
+        working-directory: a340-app
+        run: python lineassistant_v143_crop_confirm_toolbar_patch.py
+      - name: Apply Line Assistant 1.4.4 cockpit-only PFR OCR and stale-state reset
+        working-directory: a340-app
+        run: python lineassistant_v144_cockpit_only_pfr_patch.py
+      - name: Apply Line Assistant 1.4.5 verified CMS candidate selector
+        working-directory: a340-app
+        run: python lineassistant_v145_cms_candidate_selector_patch.py
+      - name: Prepare clean patched 1.4.5 source snapshot
+        shell: bash
+        run: |
+          rm -rf a340-app/.gradle a340-app/app/build a340-app/build a340-app/.idea
+          rm -f a340-app/local.properties
+      - name: Upload 1.4.5 source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.5-Source
+          path: a340-app/
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Install Android 35 SDK
+        shell: bash
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Route Technical Master search through AndroidX bundled FTS5 SQLite
+        shell: bash
+        run: |
+          FILE='a340-app/app/src/main/java/com/a340/technicalassistant/SearchRepository.kt'
+          grep -q 'import android.database.sqlite.SQLiteDatabase' "$FILE"
+          sed -i 's/import android.database.sqlite.SQLiteDatabase/import com.a340.technicalassistant.db.FtsSQLiteDatabase as SQLiteDatabase/' "$FILE"
+          grep -q 'import com.a340.technicalassistant.db.FtsSQLiteDatabase as SQLiteDatabase' "$FILE"
+      - name: Build debug APK
+        working-directory: a340-app
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:assembleDebug --stacktrace
+      - name: Verify bundled SQLite native library
+        shell: bash
+        run: |
+          unzip -l a340-app/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
+      - name: Rename APK
+        run: cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.4.5.apk
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.5
+          path: LineAssistant-1.4.5.apk
+          if-no-files-found: error
