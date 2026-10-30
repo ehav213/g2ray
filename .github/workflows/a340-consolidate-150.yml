@@ -1,0 +1,119 @@
+name: One-time Line Assistant 1.5.0 Source Consolidation
+
+on:
+  push:
+    branches: [ a340-v7-local-llm ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lineassistant-v150-consolidation
+  cancel-in-progress: false
+
+jobs:
+  consolidate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect whether consolidation is needed
+        id: state
+        shell: bash
+        run: |
+          if grep -q 'versionName = "1.5.0"' a340-app/app/build.gradle.kts; then
+            echo 'needed=false' >> "$GITHUB_OUTPUT"
+            echo 'Source is already consolidated.'
+          else
+            echo 'needed=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Materialize final 1.4.5 source from historical patches
+        if: steps.state.outputs.needed == 'true'
+        working-directory: a340-app
+        shell: bash
+        run: |
+          set -euo pipefail
+          python lineassistant_v111_runtime_patch.py
+          python lineassistant_v120_pfr_patch.py
+          python lineassistant_v130_pfr_strict_patch.py
+          python lineassistant_v131_compile_fix.py
+          python lineassistant_v132_version_patch.py
+          python lineassistant_v133_output_cleanup_patch.py
+          python lineassistant_v134_task_range_patch.py
+          python lineassistant_v135_pfr_element_split_patch.py
+          python lineassistant_v135_compile_fix.py
+          python lineassistant_v136_universal_pfr_patch.py
+          python lineassistant_v137_pfr_structured_editor_patch.py
+          python lineassistant_v138_patchfix.py
+          python lineassistant_v138_entrypoint_classification_patch.py
+          python lineassistant_v139_exact_ecam_classification_patch.py
+          python lineassistant_v140_cms_index_match_patch.py
+          python lineassistant_v141_sections_manual_crop_patch.py
+          python lineassistant_v141_compile_fix.py
+          python lineassistant_v142_unified_ios_patch.py
+          python lineassistant_v142_xml_fix.py
+          python lineassistant_v143_crop_confirm_toolbar_patch.py
+          python lineassistant_v144_cockpit_only_pfr_patch.py
+          python lineassistant_v145_cms_candidate_selector_patch.py
+
+      - name: Apply consolidated 1.5.0 fail-closed revision
+        if: steps.state.outputs.needed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat a340-app/.v150/part*.patch > /tmp/lineassistant_v150.patch
+          cd a340-app
+          patch -p1 < /tmp/lineassistant_v150.patch
+          python verify_lineassistant_regressions.py
+
+      - name: Set up JDK 17
+        if: steps.state.outputs.needed == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        if: steps.state.outputs.needed == 'true'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android 35 SDK
+        if: steps.state.outputs.needed == 'true'
+        shell: bash
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Compile consolidated source before committing
+        if: steps.state.outputs.needed == 'true'
+        working-directory: a340-app
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify bundled FTS SQLite in APK
+        if: steps.state.outputs.needed == 'true'
+        shell: bash
+        run: unzip -l a340-app/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
+
+      - name: Commit only the compiled consolidated source
+        if: steps.state.outputs.needed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf a340-app/.v150 a340-app/.gradle a340-app/app/build a340-app/build a340-app/.idea
+          rm -f a340-app/local.properties
+          git config user.name 'LineAssistant Consolidator'
+          git config user.email 'actions@users.noreply.github.com'
+          git add a340-app/app a340-app/verify_lineassistant_regressions.py
+          git add -u a340-app/.v150
+          git commit -m 'Consolidate Line Assistant 1.5.0 source'
+          git push origin HEAD:a340-v7-local-llm
