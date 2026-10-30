@@ -1,10 +1,86 @@
-name: Deprecated Line Assistant patch-chain build
+name: Build Line Assistant 1.5.0 Consolidated
 
 on:
+  push:
+    branches: [ a340-v7-local-llm ]
+    paths:
+      - 'a340-app/**'
+      - '.github/workflows/a340-apk-build.yml'
   workflow_dispatch:
 
+concurrency:
+  group: lineassistant-a340-v7-local-llm
+  cancel-in-progress: true
+
 jobs:
-  deprecated:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - run: echo "Deprecated. Line Assistant builds now use the consolidated source workflow."
+      - name: Checkout consolidated source
+        uses: actions/checkout@v4
+
+      - name: Regression guards
+        working-directory: a340-app
+        run: python verify_lineassistant_regressions.py
+
+      - name: Verify direct-source build invariants
+        shell: bash
+        run: |
+          ! grep -E 'run: python lineassistant_v[0-9].*patch\.py' .github/workflows/a340-apk-build.yml
+          grep -q 'versionName = "1.5.0"' a340-app/app/build.gradle.kts
+          grep -q 'FtsSQLiteDatabase as SQLiteDatabase' a340-app/app/src/main/java/com/a340/technicalassistant/SearchRepository.kt
+
+      - name: Upload immutable 1.5.0 source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.5.0-Source
+          path: a340-app/
+          if-no-files-found: error
+          include-hidden-files: true
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android 35 SDK
+        shell: bash
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Build debug APK from source of truth
+        working-directory: a340-app
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify bundled SQLite native library
+        shell: bash
+        run: unzip -l a340-app/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
+
+      - name: Create APK and SHA256
+        shell: bash
+        run: |
+          cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.5.0.apk
+          sha256sum LineAssistant-1.5.0.apk | tee LineAssistant-1.5.0.sha256
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.5.0
+          path: |
+            LineAssistant-1.5.0.apk
+            LineAssistant-1.5.0.sha256
+          if-no-files-found: error
