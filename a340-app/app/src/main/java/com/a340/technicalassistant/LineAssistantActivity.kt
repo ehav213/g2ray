@@ -7,6 +7,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
@@ -294,7 +295,7 @@ class LineAssistantActivity : AppCompatActivity() {
         txtResultHeading.visibility = View.VISIBLE
         txtResult.visibility = View.VISIBLE
         txtResult.text = result.summary
-        renderSourcePacket(result.hits)
+        renderSourcePacket(result)
         if (result.tsmCandidates.isNotEmpty()) renderTsmCandidateChooser(result, label)
         aiCard.visibility = View.VISIBLE
         val verifiedEvidence = result.tsmCandidates.isEmpty() && (result.tsm != null ||
@@ -393,21 +394,33 @@ class LineAssistantActivity : AppCompatActivity() {
         }
     }
 
-    private fun renderSourcePacket(hits: List<SearchHit>) {
-        sourceContainer.removeAllViews()
-        txtSourcesHeading.text = "VERIFIED ORIGINAL SOURCES"
-        if (hits.isEmpty()) return
-        txtSourcesHeading.visibility = View.VISIBLE
-        sourceContainer.visibility = View.VISIBLE
-        var lastStage = ""
-        hits.forEach { hit ->
-            val stage = stageLabel(hit)
-            if (stage != lastStage) {
-                sourceContainer.addView(sectionHeader(stage))
-                lastStage = stage
-            }
-            sourceContainer.addView(sourceCard(hit))
+    private fun renderSourcePacket(result: LineAssistantResult) =
+        renderSourcePacket(result.hits, showSupportStatus = result.tsm != null)
+
+    private fun renderSourcePacket(hits: List<SearchHit>) =
+        renderSourcePacket(hits, showSupportStatus = false)
+
+    private fun renderSourcePacket(hits: List<SearchHit>, showSupportStatus: Boolean) {
+        sourceContainer.removeAllViews(); txtSourcesHeading.text = "VERIFIED ORIGINAL SOURCES"
+        if (hits.isEmpty() && !showSupportStatus) return
+        txtSourcesHeading.visibility=View.VISIBLE; sourceContainer.visibility=View.VISIBLE
+        val order=listOf("1 • MEL EXACT ENTRY","1B • MEL REFERENCED ITEM","1C • MEL OPERATIONAL PROCEDURE","2 • TSM EXACT TASK","3 • AMM REFERENCED TASK","4 • ASM REFERENCED SCHEMATIC","5 • AWM EXACT IDENTIFIER / DIAGRAM","6 • IPC PART / FIN","7 • ESPM INFO ONLY")
+        val groups=hits.groupBy(::stageLabel)
+        order.forEach { stage ->
+            val rows=groups[stage].orEmpty()
+            if (rows.isNotEmpty()) { sourceContainer.addView(sectionHeader(stage)); rows.forEach { sourceContainer.addView(sourceCard(it)) } }
+            else if (showSupportStatus && stage.startsWith("5 • AWM")) { sourceContainer.addView(sectionHeader(stage)); sourceContainer.addView(unresolvedSourceCard("AWM","No exact AWM diagram or identifier was verified from the selected TSM path. Broad ATA/wiring guessing is suppressed.")) }
+            else if (showSupportStatus && stage.startsWith("6 • IPC")) { sourceContainer.addView(sectionHeader(stage)); sourceContainer.addView(unresolvedSourceCard("IPC","No exact IPC FIN or part number was verified from the selected TSM path. Broad parts guessing is suppressed.")) }
         }
+        groups.filterKeys { it !in order }.forEach { (stage,rows) -> sourceContainer.addView(sectionHeader(stage)); rows.forEach { sourceContainer.addView(sourceCard(it)) } }
+    }
+
+    private fun unresolvedSourceCard(manual:String, reason:String):View {
+        val card=MaterialCardView(this).apply { radius=dp(12).toFloat(); strokeWidth=dp(1); strokeColor=Color.parseColor("#D1D1D6"); setCardBackgroundColor(Color.parseColor("#F8F8FA")); layoutParams=LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin=dp(8) } }
+        val box=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(12),dp(11),dp(12),dp(11)) }
+        box.addView(TextView(this).apply { text="$manual • NOT EXACTLY RESOLVED"; setTextColor(Color.parseColor("#6E6E73")); textSize=11f; setTypeface(typeface,Typeface.BOLD) })
+        box.addView(TextView(this).apply { text=reason; setTextColor(Color.parseColor("#6E6E73")); textSize=11f; setPadding(0,dp(5),0,0) })
+        card.addView(box); return card
     }
 
     private fun stageLabel(hit: SearchHit): String = when {
@@ -605,9 +618,13 @@ class LineAssistantActivity : AppCompatActivity() {
                     multiTouchEnabled = true,
                     autoZoomEnabled = true,
                     initialCropWindowPaddingRatio = 0.02f,
-                    activityTitle = if (photoMode == PhotoMode.PFR) "Crop PFR — tap USE" else "Crop image — tap USE",
+                    activityTitle = if (photoMode == PhotoMode.PFR) "Crop / Straighten PFR — tap USE" else "Crop / Straighten image — tap USE",
                     cropMenuCropButtonTitle = "USE",
                     activityMenuIconColor = Color.parseColor("#0A84FF"),
+                    allowRotation = true,
+                    allowCounterRotation = true,
+                    rotationDegrees = 1,
+                    outputCompressFormat = Bitmap.CompressFormat.PNG,
                     outputCompressQuality = 100
                 )
             )
@@ -616,28 +633,31 @@ class LineAssistantActivity : AppCompatActivity() {
 
     private fun ocr(uri: Uri) {
         if (photoMode == PhotoMode.PFR) {
-            clearResults()
-            ocrContainer.removeAllViews()
-            ocrContainer.visibility = View.VISIBLE
+            clearResults(); ocrContainer.removeAllViews(); ocrContainer.visibility = View.VISIBLE
             addOcrLabel("PFR OCR • READING CONFIRMED CROP")
-            addOcrInfo("Previous manual entry fields were cleared. Only values detected from this cropped PFR image will be populated.")
+            addOcrInfo("The confirmed crop is the OCR source. Residual angle is auto-deskewed and a contrast-enhanced second pass is compared before fields are populated.")
+            status("PFR OCR • CROP + AUTO-DESKEW + ENHANCED PASS…")
+            io.execute {
+                runCatching { PfrOcrPipeline.recognize(this, uri) }
+                    .onSuccess { outcome -> ui {
+                        appLog.i("PFR_OCR_PIPELINE", "${outcome.note} | raw=${outcome.rawScore} enhanced=${outcome.enhancedScore}")
+                        handlePfrOcr(outcome.text, outcome.note)
+                    } }
+                    .onFailure { e -> ui { status("OCR FAILED • CHECK LOG"); appLog.e("OCR_FAIL", e) } }
+            }
+            return
         }
         status("OCR • READING IMAGE…")
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         runCatching { InputImage.fromFilePath(this, uri) }
-            .onSuccess { image ->
-                recognizer.process(image)
-                    .addOnSuccessListener { result ->
-                        if (photoMode == PhotoMode.PFR) handlePfrOcr(result)
-                        else handleOcrText(result.text.trim())
-                    }
-                    .addOnFailureListener { e -> status("OCR FAILED • CHECK LOG"); appLog.e("OCR_FAIL", e) }
-                    .addOnCompleteListener { recognizer.close() }
-            }
+            .onSuccess { image -> recognizer.process(image)
+                .addOnSuccessListener { result -> handleOcrText(result.text.trim()) }
+                .addOnFailureListener { e -> status("OCR FAILED • CHECK LOG"); appLog.e("OCR_FAIL", e) }
+                .addOnCompleteListener { recognizer.close() } }
             .onFailure { e -> recognizer.close(); appLog.e("OCR_IMAGE_FAIL", e) }
     }
 
-    private fun handlePfrOcr(result: Text) {
+    private fun handlePfrOcr(result: Text, processingNote: String = "") {
         val text = result.text.trim()
         if (text.isBlank()) return toast("No readable text detected")
         clearResults()
@@ -647,6 +667,7 @@ class LineAssistantActivity : AppCompatActivity() {
 
         val parsed = PfrGeometryAnalyzerV2.analyze(result)
         addOcrLabel("FIRST ENTRY POINT • OCR VALUES ARE EDITABLE")
+        if (processingNote.isNotBlank()) addOcrInfo(processingNote)
         addOcrInfo("OCR separates ECAM / Cockpit Status / CMS fields. Empty sections stay empty. Review or correct the fields before troubleshooting.")
 
         if (parsed.faults.isEmpty()) {

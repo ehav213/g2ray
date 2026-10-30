@@ -1353,7 +1353,10 @@ class LineAssistantEngine(
         ids += input.identifiers
         val scopedNorm = normalizeText(scoped)
         ids += tsm.identifiers.filter { containsWholeToken(scopedNorm, normalizeToken(it)) }
-        ids.filter { it.length >= 3 }.take(18).forEach { id ->
+        // Support manuals are seeded only by the verified selected TSM path.
+        ids += extractIdentifiers(scoped)
+        ids += extractReferencedPartNumbers(scoped)
+        ids.filter { it.length >= 3 }.take(28).forEach { id ->
             awmIdentifierHit(id)?.let(::add)
             ipcIdentifierHit(id)?.let(::add)
         }
@@ -1390,16 +1393,34 @@ class LineAssistantEngine(
     }.getOrNull()
 
     private fun awmIdentifierHit(id: String): SearchHit? = runCatching {
-        db.rawQuery("SELECT i.id,i.token,i.kind,p.pdf_page FROM awm_identifiers i JOIN pages p ON p.page_id=i.page_id WHERE UPPER(i.token)=? ORDER BY p.pdf_page LIMIT 1",
-            arrayOf(normalizeToken(id))).use { c ->
+        val raw = id.trim().uppercase(Locale.US)
+        val normalized = normalizeToken(id)
+        db.rawQuery(
+            """SELECT i.id,i.token,i.kind,p.pdf_page
+               FROM awm_identifiers i JOIN pages p ON p.page_id=i.page_id
+               WHERE UPPER(i.token)=?
+                  OR REPLACE(REPLACE(REPLACE(REPLACE(UPPER(i.token),'-',''),'/',''),' ',''),'.','')=?
+               ORDER BY p.pdf_page LIMIT 1""".trimIndent(),
+            arrayOf(raw, normalized)
+        ).use { c ->
             if (!c.moveToFirst()) return@use null
             SearchHit("awm_identifier", c.getLong(0).toString(), "AWM", c.getString(1), c.getString(2), "Exact AWM identifier • PDF page ${c.getInt(3)}", -4100.0)
         }
     }.getOrNull()
 
     private fun ipcIdentifierHit(id: String): SearchHit? = runCatching {
-        db.rawQuery("SELECT COALESCE(fin,''),part_number,COALESCE(nomenclature,''),COALESCE(raw_block,'') FROM ipc_items WHERE UPPER(COALESCE(fin,''))=? OR UPPER(part_number)=? ORDER BY pdf_page LIMIT 1",
-            arrayOf(normalizeToken(id), normalizeToken(id))).use { c ->
+        val raw = id.trim().uppercase(Locale.US)
+        val normalized = normalizeToken(id)
+        db.rawQuery(
+            """SELECT COALESCE(fin,''),part_number,COALESCE(nomenclature,''),COALESCE(raw_block,'')
+               FROM ipc_items
+               WHERE UPPER(COALESCE(fin,''))=?
+                  OR UPPER(part_number)=?
+                  OR REPLACE(REPLACE(REPLACE(REPLACE(UPPER(COALESCE(fin,'')),'-',''),'/',''),' ',''),'.','')=?
+                  OR REPLACE(REPLACE(REPLACE(REPLACE(UPPER(part_number),'-',''),'/',''),' ',''),'.','')=?
+               ORDER BY pdf_page LIMIT 1""".trimIndent(),
+            arrayOf(raw, raw, normalized, normalized)
+        ).use { c ->
             if (!c.moveToFirst()) return@use null
             val ref = c.getString(0).ifBlank { c.getString(1) }
             SearchHit("part_number", c.getString(1), "IPC", ref, c.getString(2), c.getString(3).take(1200), -4000.0)
@@ -1460,7 +1481,7 @@ class LineAssistantEngine(
     }
 
     private fun buildSummary(input: FaultInput, mel: LineMelResolution, tsm: LineTsmResolution?, profile: String, candidates: List<LineTsmCandidate>, state: LineTsmState, note: String): String = buildString {
-        append("LINE ASSISTANT 1.5.0 • CONSOLIDATED FAIL-CLOSED RESOLVER\n\n")
+        append("LINE ASSISTANT 1.5.1 • OCR + VERIFIED SUPPORT SOURCES\n\n")
         input.parsedFault?.let { append("PFR STRUCTURED RECORD\n").append(it.displaySummary()).append("\n\n") }
 
         append("1 • MEL / DISPATCH\n")
@@ -1611,6 +1632,12 @@ class LineAssistantEngine(
         Regex("\\b\\d{1,4}[A-Z]{1,4}\\d{0,4}\\b").findAll(upper).forEach { out += it.value }
         Regex("\\b(?:LGCIU\\d|BMC\\d(?:-\\d)?)\\b").findAll(upper).forEach { out += it.value }
         return out.filterNot { it.matches(Regex("\\d+")) }.take(28)
+    }
+
+    private fun extractReferencedPartNumbers(text:String):List<String> {
+        val out=linkedSetOf<String>()
+        Regex("\\b(?:P/N|PN|PART\\s*(?:NO\\.?|NUMBER))\\s*[:#=-]?\\s*([A-Z0-9][A-Z0-9./-]{3,})\\b",RegexOption.IGNORE_CASE).findAll(text).mapNotNull { it.groupValues.getOrNull(1)?.uppercase(Locale.US)?.trim()?.trimEnd('.',',',';',':') }.filter { it.any(Char::isDigit) }.forEach(out::add)
+        return out.take(16)
     }
 
     private fun baseFaultMessage(text: String): String = normalizeText(text).replace(Regex("\\([^)]*\\)"), " ").replace(Regex("\\s+"), " ").trim()

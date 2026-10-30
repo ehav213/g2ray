@@ -6,6 +6,7 @@ engine = (ROOT / 'app/src/main/java/com/a340/technicalassistant/LineAssistantEng
 activity = (ROOT / 'app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt').read_text()
 post = (ROOT / 'app/src/main/java/com/a340/technicalassistant/PostFlightAnalyzer.kt').read_text()
 geom = (ROOT / 'app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt').read_text()
+ocrpipe = (ROOT / 'app/src/main/java/com/a340/technicalassistant/PfrOcrPipeline.kt').read_text()
 repo = (ROOT / 'app/src/main/java/com/a340/technicalassistant/SearchRepository.kt').read_text()
 gradle = (ROOT / 'app/build.gradle.kts').read_text()
 
@@ -14,9 +15,9 @@ def require(name, condition):
     checks.append((name, bool(condition)))
 
 # Build/source invariants.
-require('version is consolidated 1.5.0', 'versionName = "1.5.0"' in gradle and 'versionCode = 50' in gradle)
+require('version is 1.5.1', 'versionName = "1.5.1"' in gradle and 'versionCode = 51' in gradle)
 require('SearchRepository uses bundled FTS SQLite directly', 'FtsSQLiteDatabase as SQLiteDatabase' in repo and 'android.database.sqlite.SQLiteDatabase' not in repo)
-require('engine is consolidated release', 'LINE ASSISTANT 1.5.0 • CONSOLIDATED FAIL-CLOSED RESOLVER' in engine)
+require('engine is 1.5.1 release', 'LINE ASSISTANT 1.5.1 • OCR + VERIFIED SUPPORT SOURCES' in engine)
 
 # Regression: cockpit-only must never be re-labeled as CMS maintenance text.
 require('cockpit-only PFR keeps maintenanceMessage empty', 'maintenanceMessage = if (hasCms) fault.text else ""' in engine)
@@ -42,11 +43,16 @@ require('not-resolved result explicitly suppresses guessing', 'direct-task guess
 # Regression: support manuals only from verified references/identifiers.
 support = engine[engine.index('    private fun supportHits('):engine.index('    private fun taskHit(', engine.index('    private fun supportHits('))]
 require('supportHits does not derive identifiers from message text', 'extractIdentifiers(input.maintenanceMessage)' not in support)
+require('supportHits derives exact IDs from selected TSM branch only', 'extractIdentifiers(scoped)' in support and 'extractReferencedPartNumbers(scoped)' in support)
+require('AWM IPC identifiers use normalized exact matching', 'REPLACE(REPLACE(REPLACE(REPLACE(UPPER(i.token)' in engine and 'arrayOf(raw, raw, normalized, normalized)' in engine)
 
 # Regression: stale UI state and OCR handling.
 require('source heading reset', activity.count('txtSourcesHeading.text = "VERIFIED ORIGINAL SOURCES"') >= 2)
 require('unified entry clears previous result', re.search(r'private fun showUnifiedFirstEntryPoint\(\).*?clearResults\(\)', activity, re.S) is not None)
-require('PFR OCR clears prior free-text query', re.search(r'private fun handlePfrOcr\(result: Text\).*?editQuery\.setText\(""\)', activity, re.S) is not None)
+require('PFR OCR clears prior free-text query', re.search(r'private fun handlePfrOcr\(result: Text, processingNote: String = ""\).*?editQuery\.setText\(""\)', activity, re.S) is not None)
+require('PFR OCR uses confirmed crop enhancement pipeline', 'PfrOcrPipeline.recognize(this, uri)' in activity and 'estimateSkewDegrees' in ocrpipe and 'enhance(source: Bitmap' in ocrpipe)
+require('crop supports fine straighten angle', 'rotationDegrees = 1' in activity and 'allowCounterRotation = true' in activity and 'Bitmap.CompressFormat.PNG' in activity)
+require('AWM and IPC unresolved stages remain visible without guessing', 'unresolvedSourceCard(' in activity and 'Broad ATA/wiring guessing is suppressed.' in activity and 'Broad parts guessing is suppressed.' in activity)
 require('cockpit-only crop parser exists', 'analyzeCockpitOnlyCrop' in geom)
 require('PostFlight fault carries cockpitType', 'val cockpitType: String? = null' in post)
 
