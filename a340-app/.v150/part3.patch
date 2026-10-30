@@ -1,0 +1,124 @@
++            note = "Unique TSM index mapping verified."
++        } else if (candidateRecords.isEmpty() && state == LineTsmState.NOT_FOUND) {
++            note = "No unique TSM Warnings/Malfunction index mapping was verified. Broad task guessing is disabled."
++        }
+ 
+         val orderedHits = mutableListOf<SearchHit>()
+         val seen = linkedSetOf<String>()
+@@ -277,16 +315,21 @@
+             supportHits(tsm, input).forEach(::add)
+         }
+ 
+-        val publicCandidates = if (selectionRequired) cockpitCandidates.map(::toPublicCandidate) else emptyList()
++        val publicCandidates = candidateRecords.distinctBy {
++            "${it.indexTaskRef}|${it.maintenanceAta}|${normalizeText(it.maintenanceMessage)}|${it.source}|${it.faultClass}"
++        }.map(::toPublicCandidate)
++
+         return LineAssistantResult(
+-            summary = buildSummary(input, mel, tsm, aircraftProfile, publicCandidates),
++            summary = buildSummary(input, mel, tsm, aircraftProfile, publicCandidates, state, note),
+             safetySummary = buildSafety(mel, tsm, aircraftProfile),
+             evidencePack = buildEvidencePacket(input, mel, tsm, orderedHits),
+             hits = orderedHits,
+             mel = mel,
+             tsm = tsm,
+             structuredFault = input.parsedFault,
+-            tsmCandidates = publicCandidates
++            tsmCandidates = publicCandidates,
++            tsmState = state,
++            tsmNote = note
+         )
+     }
+ 
+@@ -306,9 +349,22 @@
+         maintenanceMessage = record.maintenanceMessage,
+         source = record.source,
+         faultClass = record.faultClass,
+-        identifiers = record.identifiers
++        identifiers = record.identifiers,
++        applicability = findTaskRow("TSM", record.indexTaskRef)?.applicability.orEmpty()
+     )
+ 
++    private fun filterTsmCandidatesByProfile(records: List<TsmIndexRecord>, aircraftProfile: String): List<TsmIndexRecord> {
++        if (records.size <= 1 || aircraftProfile.isBlank()) return records
++        val evaluated = records.map { record ->
++            val applicability = findTaskRow("TSM", record.indexTaskRef)?.applicability.orEmpty()
++            record to applicabilityMatch(applicability, aircraftProfile)
++        }
++        val matched = evaluated.filter { it.second == ApplicabilityMatch.MATCH }.map { it.first }
++        if (matched.isNotEmpty()) return matched
++        val notRejected = evaluated.filter { it.second != ApplicabilityMatch.NO_MATCH }.map { it.first }
++        return if (notRejected.isNotEmpty()) notRejected else records
++    }
++
+     private fun findCockpitTsmCandidates(input: FaultInput): List<TsmIndexRecord> {
+         val query = input.cockpitMessage?.takeIf { it.isNotBlank() } ?: input.maintenanceMessage
+         val words = significantWords(query)
+@@ -361,7 +417,7 @@
+         return referenceAwareLevenshtein(a, b) <= 1
+     }
+ 
+-    private fun findDirectTsmTask(input: FaultInput): TaskRow? {
++    private fun legacyFindDirectTsmTaskDisabled(input: FaultInput): TaskRow? {
+         if (input.parsedFault == null || input.maintenanceAta.isNullOrBlank() || input.maintenanceMessage.isBlank()) return null
+         val ids = (input.identifiers + extractIdentifiers(input.maintenanceMessage))
+             .map(::normalizeToken).filter { it.length >= 3 }.distinct()
+@@ -446,7 +502,7 @@
+         return branches.any { candidate -> ocrMessageSimilarity(input.maintenanceMessage, candidate) >= 0.94 }
+     }
+ 
+-    private fun resolveDirectTask(task: TaskRow, input: FaultInput, cockpitSource: String): LineTsmResolution? {
++    private fun legacyResolveDirectTaskDisabled(task: TaskRow, input: FaultInput, cockpitSource: String): LineTsmResolution? {
+         val content = exactTaskContent(task)
+         if (!directTaskContentMatches(content, input)) return null
+         val branch = selectTroubleshootingBranch(content, input)
+@@ -470,7 +526,7 @@
+         )
+     }
+ 
+-    private fun findTsmIndexRecord(input: FaultInput): TsmIndexRecord? {
++    private fun findTsmIndexMatches(input: FaultInput): List<TsmIndexRecord> {
+         val ids = (input.identifiers + extractIdentifiers(input.maintenanceMessage))
+             .map(::normalizeToken).filter { it.length >= 3 }.distinct()
+         val words = significantWords(input.maintenanceMessage)
+@@ -526,14 +582,25 @@
+             if (candidates.any { exactIndexMatch(it, input) }) break
+         }
+ 
+-        val matched = candidates.filter { acceptableIndexMatch(it, input) && pfrPhotoMatchIsStrong(it, input) }
+-        if (matched.isEmpty()) return null
+-        val scored = matched.map { it to indexScore(it, input) }.sortedByDescending { it.second }
++        return candidates
++            .filter { acceptableIndexMatch(it, input) && pfrPhotoMatchIsStrong(it, input) }
++            .distinctBy { "${it.indexTaskRef}|${it.maintenanceAta}|${normalizeText(it.maintenanceMessage)}|${it.source}|${it.faultClass}" }
++            .sortedByDescending { indexScore(it, input) }
++    }
++
++    private fun chooseUniqueIndexRecord(matches: List<TsmIndexRecord>, input: FaultInput): TsmIndexRecord? {
++        if (matches.isEmpty()) return null
++        val scored = matches.map { it to indexScore(it, input) }.sortedByDescending { it.second }
+         val best = scored.first()
+-        val competing = scored.drop(1).firstOrNull { it.second == best.second && it.first.indexTaskRef != best.first.indexTaskRef }
++        val competing = scored.drop(1).firstOrNull {
++            it.second == best.second && it.first.indexTaskRef != best.first.indexTaskRef
++        }
+         return if (competing == null) best.first else null
+     }
+ 
++    private fun findTsmIndexRecord(input: FaultInput): TsmIndexRecord? =
++        chooseUniqueIndexRecord(findTsmIndexMatches(input), input)
++
+     private fun parseTsmIndexRecords(filename: String, page: Int, content: String): List<TsmIndexRecord> {
+         val lines = content.lines().map(::cleanLine).filter { it.isNotBlank() }
+         val starts = lines.indices.filter { lines[it].equals("WARNINGS/MALFUNCTION", true) }
+@@ -584,7 +651,7 @@
+                 val ataIndex = payload.indexOfFirst { it.matches(Regex("\\d{2}-\\d{2}")) }
+                 val cockpitAta = if (ataIndex >= 0) payload[ataIndex] else ""
+                 val startMessage = if (ataIndex >= 0) ataIndex + 1 else 0
+-                val knownTypes = listOf("OBSERVATIONS", "EWD WARNING(S)", "PFD FLAG(S)", "ND FLAG(S)", "STS-INOP SYSTEM", "MAINTENANCE STATUS", "MAINT STATUS")
++                val knownTypes = listOf("OBSERVATIONS", "EWD WARNING(S)", "PFD FLAG(S)", "ND FLAG(S)", "STS-INOP SYSTEM", "STS-MAINTENANCE", "MAINTENANCE STATUS", "MAINT STATUS")
+                 var joined = payload.drop(startMessage).joinToString(" ").trim()
+                 val type = knownTypes.firstOrNull { joined.endsWith(it, true) }.orEmpty()
+                 if (type.isNotBlank()) joined = joined.dropLast(type.length).trim()
+@@ -670,7 +737,7 @@
+         fun canonical(value: String): String {
