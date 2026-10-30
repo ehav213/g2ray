@@ -58,21 +58,24 @@ jobs:
       - name: Apply Line Assistant 1.4.0 robust CMS TSM index matching
         working-directory: a340-app
         run: python lineassistant_v140_cms_index_match_patch.py
-      - name: Apply Line Assistant 1.4.1 multi-entry manual sections and crop-first OCR
+      - name: Apply Line Assistant 1.4.1 crop-first OCR
         working-directory: a340-app
         run: python lineassistant_v141_sections_manual_crop_patch.py
       - name: Apply Line Assistant 1.4.1 nullable camera URI compile fix
         working-directory: a340-app
         run: python lineassistant_v141_compile_fix.py
-      - name: Prepare clean patched 1.4.1 source snapshot
+      - name: Apply Line Assistant 1.4.2 unified iOS-style first-entry screen
+        working-directory: a340-app
+        run: python lineassistant_v142_unified_ios_patch.py
+      - name: Prepare clean patched 1.4.2 source snapshot
         shell: bash
         run: |
           rm -rf a340-app/.gradle a340-app/app/build a340-app/build a340-app/.idea
           rm -f a340-app/local.properties
-      - name: Upload 1.4.1 source snapshot
+      - name: Upload 1.4.2 source snapshot
         uses: actions/upload-artifact@v4
         with:
-          name: LineAssistant-1.4.1-Source
+          name: LineAssistant-1.4.2-Source
           path: a340-app/
           if-no-files-found: error
           include-hidden-files: true
@@ -110,10 +113,10 @@ jobs:
         run: |
           unzip -l a340-app/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
       - name: Rename APK
-        run: cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.4.1.apk
+        run: cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.4.2.apk
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LineAssistant-1.4.1
-          path: LineAssistant-1.4.1.apk
+          name: LineAssistant-1.4.2
+          path: LineAssistant-1.4.2.apk
           if-no-files-found: error
