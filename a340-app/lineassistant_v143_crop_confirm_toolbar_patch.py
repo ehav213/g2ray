@@ -10,7 +10,7 @@ m = manifest.read_text()
 activity_anchor = '''        <activity android:name=".LineAssistantActivity" android:exported="true">\n            <intent-filter>\n                <action android:name="android.intent.action.MAIN" />\n                <category android:name="android.intent.category.LAUNCHER" />\n            </intent-filter>\n        </activity>\n\n'''
 if activity_anchor not in m:
     raise SystemExit('1.4.3: LineAssistantActivity manifest anchor not found')
-crop_activity = '''        <activity\n            android:name="com.canhub.cropper.CropImageActivity"\n            android:exported="false"\n            android:theme="@style/Theme.A340Cropper"\n            tools:replace="android:theme" />\n\n'''
+crop_activity = '''        <activity\n            android:name="com.canhub.cropper.CropImageActivity"\n            android:exported="false"\n            android:theme="@style/Theme.A340Cropper"\n            tools:replace="android:theme,android:exported" />\n\n'''
 if 'android:name="com.canhub.cropper.CropImageActivity"' not in m:
     m = m.replace(activity_anchor, activity_anchor + crop_activity, 1)
 manifest.write_text(m)
@@ -32,7 +32,6 @@ a = a.replace(
     'activityTitle = if (photoMode == PhotoMode.PFR) "Crop PFR — tap USE" else "Crop image — tap USE",',
     1
 )
-a = a.replace('cropMenuCropButtonTitle = "USE",', 'cropMenuCropButtonTitle = "USE",', 1)
 activity.write_text(a)
 
 # Version metadata.
