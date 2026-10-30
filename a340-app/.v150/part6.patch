@@ -1,0 +1,8 @@
++require('PostFlight fault carries cockpitType', 'val cockpitType: String? = null' in post)
++
++failed = [name for name, ok in checks if not ok]
++for name, ok in checks:
++    print(('PASS' if ok else 'FAIL') + ' - ' + name)
++if failed:
++    raise SystemExit('\nRegression guard failed: ' + '; '.join(failed))
++print(f'All {len(checks)} Line Assistant regression guards passed.')
