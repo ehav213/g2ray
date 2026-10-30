@@ -1,0 +1,57 @@
+name: One-time Line Assistant 1.5.1 OCR + Support Consolidation
+
+on:
+  push:
+    branches: [ a340-v7-local-llm ]
+    paths:
+      - 'a340-app/lineassistant_v151_consolidate.py'
+      - 'a340-app/app/src/main/java/com/a340/technicalassistant/PfrOcrPipeline.kt'
+      - '.github/workflows/a340-consolidate-151.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lineassistant-151-consolidate
+  cancel-in-progress: true
+
+jobs:
+  consolidate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: a340-v7-local-llm
+          fetch-depth: 0
+
+      - name: Apply verified 1.5.1 source consolidation
+        working-directory: a340-app
+        run: python lineassistant_v151_consolidate.py
+
+      - name: Run regression guards
+        working-directory: a340-app
+        run: python verify_lineassistant_regressions.py
+
+      - name: Verify patch integrity
+        run: git diff --check
+
+      - name: Commit consolidated direct source
+        shell: bash
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No source changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt \
+            a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt \
+            a340-app/app/src/main/java/com/a340/technicalassistant/PfrOcrPipeline.kt \
+            a340-app/app/build.gradle.kts \
+            a340-app/verify_lineassistant_regressions.py \
+            .github/workflows/a340-apk-build.yml
+          git commit -m "Line Assistant 1.5.1: deskew OCR and verified AWM IPC"
+          git push origin HEAD:a340-v7-local-llm
