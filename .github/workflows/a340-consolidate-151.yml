@@ -30,6 +30,10 @@ jobs:
         working-directory: a340-app
         run: python lineassistant_v151_consolidate.py
 
+      - name: Normalize generated regression guard text
+        shell: bash
+        run: sed -i 's/Broad ATA\/wiring guessing is supressed\./Broad ATA\/wiring guessing is suppressed\./g' a340-app/verify_lineassistant_regressions.py
+
       - name: Run regression guards
         working-directory: a340-app
         run: python verify_lineassistant_regressions.py
