@@ -1,0 +1,94 @@
+name: Build Line Assistant 1.5.1 OCR + AWM IPC
+
+on:
+  push:
+    branches: [ a340-v7-local-llm ]
+    paths:
+      - '.github/workflows/a340-apk-build-151.yml'
+      - '.github/scripts/build_lineassistant_151.py'
+  workflow_dispatch:
+
+concurrency:
+  group: lineassistant-151
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout consolidated 1.5.0 source
+        uses: actions/checkout@v4
+
+      - name: Apply 1.5.1 improvements to workspace
+        run: python .github/scripts/build_lineassistant_151.py
+
+      - name: Run inherited fail-closed regression guards
+        working-directory: a340-app
+        run: python verify_lineassistant_regressions.py
+
+      - name: Verify 1.5.1 OCR and support-manual invariants
+        shell: bash
+        run: |
+          grep -q 'versionName = "1.5.1"' a340-app/app/build.gradle.kts
+          grep -q 'versionCode = 51' a340-app/app/build.gradle.kts
+          grep -q 'FINAL CROP + STRAIGHTEN IMAGE' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt
+          grep -q 'OCR • PASS 2 / CONTRAST + DESKEW ENHANCEMENT' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt
+          grep -q 'estimateOcrSkew' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt
+          grep -q 'ids += tsm.identifiers' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt
+          grep -q 'extractIdentifiers(scoped)' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt
+          ! grep -q 'USE THIS CMS FAULT' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt
+
+      - name: Upload immutable 1.5.1 source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.5.1-Source
+          path: a340-app/
+          if-no-files-found: error
+          include-hidden-files: true
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android 35 SDK
+        shell: bash
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Build debug APK
+        working-directory: a340-app
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify bundled SQLite native library
+        shell: bash
+        run: unzip -l a340-app/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
+
+      - name: Create APK and SHA256
+        shell: bash
+        run: |
+          cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.5.1.apk
+          sha256sum LineAssistant-1.5.1.apk | tee LineAssistant-1.5.1.sha256
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.5.1
+          path: |
+            LineAssistant-1.5.1.apk
+            LineAssistant-1.5.1.sha256
+          if-no-files-found: error
