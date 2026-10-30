@@ -1,0 +1,151 @@
+name: Build Line Assistant 1.4.9 OCR Layout Fix
+
+on:
+  push:
+    branches: [ lineassistant-149-ocr-layout-fix ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout 1.4.9 branch
+        uses: actions/checkout@v4
+
+      - name: Apply Line Assistant patch chain through 1.4.5
+        working-directory: a340-app
+        shell: bash
+        run: |
+          python lineassistant_v111_runtime_patch.py
+          python lineassistant_v120_pfr_patch.py
+          python lineassistant_v130_pfr_strict_patch.py
+          python lineassistant_v131_compile_fix.py
+          python lineassistant_v132_version_patch.py
+          python lineassistant_v133_output_cleanup_patch.py
+          python lineassistant_v134_task_range_patch.py
+          python lineassistant_v135_pfr_element_split_patch.py
+          python lineassistant_v135_compile_fix.py
+          python lineassistant_v136_universal_pfr_patch.py
+          python lineassistant_v137_pfr_structured_editor_patch.py
+          python lineassistant_v138_patchfix.py
+          python lineassistant_v138_entrypoint_classification_patch.py
+          python lineassistant_v139_exact_ecam_classification_patch.py
+          python lineassistant_v140_cms_index_match_patch.py
+          python lineassistant_v141_sections_manual_crop_patch.py
+          python lineassistant_v141_compile_fix.py
+          python lineassistant_v142_unified_ios_patch.py
+          python lineassistant_v142_xml_fix.py
+          python lineassistant_v143_crop_confirm_toolbar_patch.py
+          python lineassistant_v144_cockpit_only_pfr_patch.py
+          python lineassistant_v145_cms_candidate_selector_patch.py
+
+      - name: Apply 1.4.6 AWM IPC support and legacy multi-pass OCR patch
+        run: python a340-app/lineassistant_v146_ocr_awm_ipc_patch.py
+
+      - name: Apply 1.4.7 approved exact launcher icon
+        working-directory: a340-app
+        run: python lineassistant_v147_exact_icon_patch.py
+
+      - name: Apply 1.4.8 restore exact 1.4.5 PFR OCR path
+        working-directory: a340-app
+        run: python lineassistant_v148_restore_145_ocr_patch.py
+
+      - name: Apply 1.4.9 layout-safe PFR parser fix
+        working-directory: a340-app
+        run: python lineassistant_v149_ocr_layout_fix.py
+
+      - name: Verify 1.4.9 OCR and placement invariants
+        shell: bash
+        run: |
+          grep -q 'versionCode = 49' a340-app/app/build.gradle.kts
+          grep -q 'versionName = "1.4.9"' a340-app/app/build.gradle.kts
+          grep -q 'LINE ASSISTANT 1.4.9' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt
+          grep -q '@drawable/line_assistant_icon_exact' a340-app/app/src/main/AndroidManifest.xml
+          echo '4eef8e4b49d20415af57873b3d04dde5972c88ff11f53880d9fcc575a16554b2  a340-app/app/src/main/res/drawable-nodpi/line_assistant_icon_exact.webp' | sha256sum -c -
+          grep -q 'AWM NOT VERIFIED' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt
+          grep -q 'IPC NOT VERIFIED' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt
+          grep -q 'PFR CONTEXT • NOT SEARCH TERMS' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt
+          grep -q 'valid HHMM is UTC unless an explicit ATA label proved otherwise' a340-app/app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt
+          grep -q 'parseUtc(w.text) == null' a340-app/app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          a=Path('a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt').read_text()
+          m=re.search(r'    private fun ocr\(uri: Uri\) \{.*?(?=\n    private fun handlePfrOcr\(result: Text\) \{)',a,re.S)
+          assert m, 'OCR block missing'
+          b=m.group(0)
+          assert 'InputImage.fromFilePath(this, uri)' in b
+          assert 'PFR OCR • READING CONFIRMED CROP' in b
+          assert 'PfrImagePreprocessor' not in b
+          assert 'runPfrOcrPipeline' not in b
+          p=Path('a340-app/app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt').read_text()
+          assert 'parseUtc(w.text) == null' in p
+          assert 'explicitCmsLabelX' in p
+          assert 'canonicalPersistenceToken' in p
+          assert 'val context = pfrSection(root, "PFR CONTEXT • NOT SEARCH TERMS")' in a
+          print('Verified: direct stable OCR retained; UTC/ATA ambiguity and CMS field placement guards installed')
+          PY
+
+      - name: Prepare clean 1.4.9 source snapshot
+        shell: bash
+        run: |
+          rm -rf a340-app/.gradle a340-app/app/build a340-app/build a340-app/.idea
+          rm -f a340-app/local.properties
+
+      - name: Upload 1.4.9 source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.9-Source
+          path: a340-app/
+          if-no-files-found: error
+          include-hidden-files: true
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android 35 SDK
+        shell: bash
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Route Technical Master through bundled FTS5 SQLite
+        shell: bash
+        run: |
+          FILE='a340-app/app/src/main/java/com/a340/technicalassistant/SearchRepository.kt'
+          grep -q 'import android.database.sqlite.SQLiteDatabase' "$FILE"
+          sed -i 's/import android.database.sqlite.SQLiteDatabase/import com.a340.technicalassistant.db.FtsSQLiteDatabase as SQLiteDatabase/' "$FILE"
+          grep -q 'import com.a340.technicalassistant.db.FtsSQLiteDatabase as SQLiteDatabase' "$FILE"
+
+      - name: Build debug APK
+        working-directory: a340-app
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify bundled SQLite native library
+        shell: bash
+        run: unzip -l a340-app/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
+
+      - name: Rename APK
+        run: cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.4.9.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.9
+          path: LineAssistant-1.4.9.apk
+          if-no-files-found: error
