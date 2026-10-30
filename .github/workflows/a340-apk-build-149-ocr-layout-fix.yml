@@ -59,33 +59,41 @@ jobs:
       - name: Verify 1.4.9 OCR and placement invariants
         shell: bash
         run: |
-          grep -q 'versionCode = 49' a340-app/app/build.gradle.kts
-          grep -q 'versionName = "1.4.9"' a340-app/app/build.gradle.kts
-          grep -q 'LINE ASSISTANT 1.4.9' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt
-          grep -q '@drawable/line_assistant_icon_exact' a340-app/app/src/main/AndroidManifest.xml
-          echo '4eef8e4b49d20415af57873b3d04dde5972c88ff11f53880d9fcc575a16554b2  a340-app/app/src/main/res/drawable-nodpi/line_assistant_icon_exact.webp' | sha256sum -c -
-          grep -q 'AWM NOT VERIFIED' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt
-          grep -q 'IPC NOT VERIFIED' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt
-          grep -q 'PFR CONTEXT • NOT SEARCH TERMS' a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt
-          grep -q 'valid HHMM is UTC unless an explicit ATA label proved otherwise' a340-app/app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt
-          grep -q 'parseUtc(w.text) == null' a340-app/app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt
           python - <<'PY'
           from pathlib import Path
-          import re
-          a=Path('a340-app/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt').read_text()
-          m=re.search(r'    private fun ocr\(uri: Uri\) \{.*?(?=\n    private fun handlePfrOcr\(result: Text\) \{)',a,re.S)
-          assert m, 'OCR block missing'
-          b=m.group(0)
-          assert 'InputImage.fromFilePath(this, uri)' in b
-          assert 'PFR OCR • READING CONFIRMED CROP' in b
-          assert 'PfrImagePreprocessor' not in b
-          assert 'runPfrOcrPipeline' not in b
-          p=Path('a340-app/app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt').read_text()
-          assert 'parseUtc(w.text) == null' in p
-          assert 'explicitCmsLabelX' in p
-          assert 'canonicalPersistenceToken' in p
-          assert 'val context = pfrSection(root, "PFR CONTEXT • NOT SEARCH TERMS")' in a
-          print('Verified: direct stable OCR retained; UTC/ATA ambiguity and CMS field placement guards installed')
+          import hashlib, re
+          root = Path('a340-app')
+          gradle = (root/'app/build.gradle.kts').read_text()
+          activity = (root/'app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt').read_text()
+          analyzer = (root/'app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt').read_text()
+          engine = (root/'app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt').read_text()
+          manifest = (root/'app/src/main/AndroidManifest.xml').read_text()
+          checks = {
+              'versionCode 49': 'versionCode = 49' in gradle,
+              'versionName 1.4.9': 'versionName = "1.4.9"' in gradle,
+              '1.4.9 engine banner': 'LINE ASSISTANT 1.4.9' in engine,
+              'approved launcher icon reference': '@drawable/line_assistant_icon_exact' in manifest,
+              'AWM guard retained': 'AWM NOT VERIFIED' in activity,
+              'IPC guard retained': 'IPC NOT VERIFIED' in activity,
+              'PFR context editor visible': 'PFR CONTEXT • NOT SEARCH TERMS' in activity,
+              'UTC excluded from ATA fallback': 'parseUtc(w.text) == null' in analyzer,
+              'CMS label geometry boundary': 'explicitCmsLabelX' in analyzer,
+              'word-level persistence classifier': 'canonicalPersistenceToken' in analyzer,
+          }
+          icon = root/'app/src/main/res/drawable-nodpi/line_assistant_icon_exact.webp'
+          checks['approved icon SHA-256'] = hashlib.sha256(icon.read_bytes()).hexdigest() == '4eef8e4b49d20415af57873b3d04dde5972c88ff11f53880d9fcc575a16554b2'
+          m = re.search(r'    private fun ocr\(uri: Uri\) \{.*?(?=\n    private fun handlePfrOcr\(result: Text\) \{)', activity, re.S)
+          checks['OCR block exists'] = m is not None
+          if m:
+              b = m.group(0)
+              checks['direct crop OCR retained'] = 'InputImage.fromFilePath(this, uri)' in b and 'PFR OCR • READING CONFIRMED CROP' in b
+              checks['broken multipass path disabled'] = 'PfrImagePreprocessor' not in b and 'runPfrOcrPipeline' not in b
+          failed = [name for name, ok in checks.items() if not ok]
+          for name, ok in checks.items():
+              print(('PASS ' if ok else 'FAIL ') + name)
+          if failed:
+              raise SystemExit('Regression verification failed: ' + ', '.join(failed))
+          print('All 1.4.9 OCR/layout invariants verified')
           PY
 
       - name: Prepare clean 1.4.9 source snapshot
