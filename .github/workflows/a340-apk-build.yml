@@ -67,6 +67,9 @@ jobs:
       - name: Apply Line Assistant 1.4.2 unified iOS-style first-entry screen
         working-directory: a340-app
         run: python lineassistant_v142_unified_ios_patch.py
+      - name: Apply Line Assistant 1.4.2 XML entity fix
+        working-directory: a340-app
+        run: python lineassistant_v142_xml_fix.py
       - name: Prepare clean patched 1.4.2 source snapshot
         shell: bash
         run: |
