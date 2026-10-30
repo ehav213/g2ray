@@ -1,4 +1,4 @@
-name: Build Line Assistant 1.4.3
+name: Build Line Assistant 1.4.4
 
 on:
   push:
@@ -73,15 +73,18 @@ jobs:
       - name: Apply Line Assistant 1.4.3 visible crop confirmation toolbar
         working-directory: a340-app
         run: python lineassistant_v143_crop_confirm_toolbar_patch.py
-      - name: Prepare clean patched 1.4.3 source snapshot
+      - name: Apply Line Assistant 1.4.4 cockpit-only PFR OCR and stale-state reset
+        working-directory: a340-app
+        run: python lineassistant_v144_cockpit_only_pfr_patch.py
+      - name: Prepare clean patched 1.4.4 source snapshot
         shell: bash
         run: |
           rm -rf a340-app/.gradle a340-app/app/build a340-app/build a340-app/.idea
           rm -f a340-app/local.properties
-      - name: Upload 1.4.3 source snapshot
+      - name: Upload 1.4.4 source snapshot
         uses: actions/upload-artifact@v4
         with:
-          name: LineAssistant-1.4.3-Source
+          name: LineAssistant-1.4.4-Source
           path: a340-app/
           if-no-files-found: error
           include-hidden-files: true
@@ -119,10 +122,10 @@ jobs:
         run: |
           unzip -l a340-app/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
       - name: Rename APK
-        run: cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.4.3.apk
+        run: cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.4.4.apk
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LineAssistant-1.4.3
-          path: LineAssistant-1.4.3.apk
+          name: LineAssistant-1.4.4
+          path: LineAssistant-1.4.4.apk
           if-no-files-found: error
