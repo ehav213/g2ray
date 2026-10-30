@@ -53,8 +53,18 @@ jobs:
         run: python lineassistant_v148_restore_145_ocr_patch.py
 
       - name: Apply 1.4.9 layout-safe PFR parser fix
-        working-directory: a340-app
-        run: python lineassistant_v149_ocr_layout_fix.py
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import base64, gzip, re, subprocess
+          s = Path('a340-app/lineassistant_v149_ocr_layout_fix.py').read_text()
+          m = re.search(r'PATCH_B64\s*=\s*"([A-Za-z0-9+/=]+)"', s)
+          assert m, '1.4.9 embedded patch payload missing'
+          patch = gzip.decompress(base64.b64decode(m.group(1)))
+          subprocess.run(['git', 'apply', '--whitespace=nowarn', '--directory=a340-app', '-'], input=patch, check=True)
+          print('Applied LineAssistant 1.4.9 patch to explicit a340-app worktree')
+          PY
 
       - name: Verify 1.4.9 OCR and placement invariants
         shell: bash
