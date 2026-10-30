@@ -1,6 +1,6 @@
 package com.a340.technicalassistant
 
-import android.database.sqlite.SQLiteDatabase
+import com.a340.technicalassistant.db.FtsSQLiteDatabase as SQLiteDatabase
 import java.io.File
 
 

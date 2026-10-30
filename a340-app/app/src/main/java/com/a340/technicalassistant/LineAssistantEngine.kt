@@ -19,6 +19,7 @@ data class LineMelCondition(
     val nbrInstalled: String,
     val nbrRequired: String,
     val placard: String,
+    val applicability: String,
     val requirements: String,
     val procedureRefs: List<String>,
     val ammTaskRefs: List<String>
@@ -68,6 +69,21 @@ data class LineTsmResolution(
     val cockpitEffectSource: String = "TSM INDEX"
 )
 
+data class LineTsmCandidate(
+    val taskRef: String,
+    val cockpitAta: String,
+    val cockpitMessage: String,
+    val cockpitType: String,
+    val maintenanceAta: String,
+    val maintenanceMessage: String,
+    val source: String,
+    val faultClass: String,
+    val identifiers: List<String>,
+    val applicability: String = ""
+)
+
+enum class LineTsmState { RESOLVED, NEEDS_CMS, AMBIGUOUS, NOT_FOUND }
+
 data class LineAssistantResult(
     val summary: String,
     val safetySummary: String,
@@ -75,7 +91,10 @@ data class LineAssistantResult(
     val hits: List<SearchHit>,
     val mel: LineMelResolution,
     val tsm: LineTsmResolution?,
-    val structuredFault: PostFlightAnalyzer.Fault?
+    val structuredFault: PostFlightAnalyzer.Fault?,
+    val tsmCandidates: List<LineTsmCandidate> = emptyList(),
+    val tsmState: LineTsmState = LineTsmState.NOT_FOUND,
+    val tsmNote: String = ""
 )
 
 /**
@@ -147,24 +166,64 @@ class LineAssistantEngine(
 
     private enum class ApplicabilityMatch { MATCH, NO_MATCH, UNKNOWN }
 
-    fun resolvePfr(fault: PostFlightAnalyzer.Fault, aircraftProfile: String): LineAssistantResult = resolve(
-        FaultInput(
-            rawText = fault.displaySummary(),
-            maintenanceMessage = fault.text,
-            maintenanceAta = fault.ataFull ?: fault.ata,
-            cockpitMessage = fault.cockpitEffect,
-            cockpitAta = fault.cockpitAta,
-            source = fault.source,
-            faultClass = fault.faultClass,
-            identifiers = (fault.identifiers + extractIdentifiers(fault.text)).distinct(),
-            parsedFault = fault
-        ),
-        aircraftProfile
-    )
+    fun classifyCockpitEntryExact(message: String?, cockpitAta: String?): String? {
+        val raw = message?.trim().orEmpty()
+        if (raw.isBlank()) return null
+        val wanted = normalizeText(raw)
+        val chapter = cockpitAta?.take(2)?.filter(Char::isDigit).orEmpty()
+        val sql: String
+        val args: Array<String>?
+        if (chapter.length == 2) {
+            sql = "SELECT title FROM mel_entries WHERE ata_chapter=?"
+            args = arrayOf(chapter)
+        } else {
+            sql = "SELECT title FROM mel_entries"
+            args = null
+        }
+        val exactMel = runCatching {
+            db.rawQuery(sql, args).use { c ->
+                while (c.moveToNext()) {
+                    if (normalizeText(c.getString(0).orEmpty()) == wanted) return@use true
+                }
+                false
+            }
+        }.getOrDefault(false)
+        return if (exactMel) "EWD WARNING(S)" else null
+    }
+
+    fun resolvePfr(fault: PostFlightAnalyzer.Fault, aircraftProfile: String): LineAssistantResult {
+        val hasCms = fault.category == "CMS FAULT MESSAGE" || !fault.ataFull.isNullOrBlank() ||
+            !fault.source.isNullOrBlank() || !fault.faultClass.isNullOrBlank()
+        val cockpitMessage = fault.cockpitEffect ?: fault.text.takeIf { !hasCms }
+        return resolve(
+            FaultInput(
+                rawText = fault.displaySummary(),
+                maintenanceMessage = if (hasCms) fault.text else "",
+                maintenanceAta = if (hasCms) (fault.ataFull ?: fault.ata) else null,
+                cockpitMessage = cockpitMessage,
+                cockpitAta = fault.cockpitAta,
+                source = if (hasCms) fault.source else null,
+                faultClass = if (hasCms) fault.faultClass else null,
+                identifiers = if (hasCms) fault.identifiers.distinct() else emptyList(),
+                parsedFault = fault
+            ),
+            aircraftProfile
+        )
+    }
 
     fun resolveText(text: String, aircraftProfile: String): LineAssistantResult {
         val parsed = runCatching { PostFlightAnalyzer.analyze(text).faults.firstOrNull() }.getOrNull()
-        if (parsed != null) return resolvePfr(parsed, aircraftProfile)
+        val structuredPfr = parsed?.let {
+            !it.ataFull.isNullOrBlank() ||
+            !it.cockpitEffect.isNullOrBlank() ||
+            !it.source.isNullOrBlank() ||
+            !it.faultClass.isNullOrBlank() ||
+            text.contains("COCKPIT EFFECT:", true) ||
+            text.contains("MAINT ATA:", true) ||
+            text.contains("SOURCE:", true) ||
+            text.contains("CLASS:", true)
+        } == true
+        if (structuredPfr) return resolvePfr(parsed!!, aircraftProfile)
 
         val ata = Regex("\\b(\\d{2})[- ]?(\\d{2})[- ]?(\\d{2})\\b")
             .find(text.uppercase(Locale.US))
@@ -190,13 +249,54 @@ class LineAssistantEngine(
     }
 
     private fun resolve(input: FaultInput, aircraftProfile: String): LineAssistantResult {
-        val indexRecord = findTsmIndexRecord(input)
+        val cockpitOnly = isCockpitOnlyInput(input)
+        val cockpitCandidates = if (cockpitOnly)
+            filterTsmCandidatesByProfile(findCockpitTsmCandidates(input), aircraftProfile)
+        else emptyList()
+
+        var candidateRecords: List<TsmIndexRecord> = emptyList()
+        var state = LineTsmState.NOT_FOUND
+        var note = ""
+        val indexRecord: TsmIndexRecord?
+
+        if (cockpitOnly) {
+            val requiresCms = cockpitCandidates.any { it.hasFaultMessage }
+            indexRecord = when {
+                cockpitCandidates.size == 1 && !requiresCms -> cockpitCandidates.first()
+                cockpitCandidates.isNotEmpty() -> {
+                    candidateRecords = cockpitCandidates
+                    state = LineTsmState.NEEDS_CMS
+                    note = "Cockpit/STS entry is verified, but the TSM index contains Fault Message branches. Enter the CMS fault actually observed on the aircraft; the app will not fabricate or auto-select one."
+                    null
+                }
+                else -> findTsmIndexRecord(input)
+            }
+        } else {
+            val matches = filterTsmCandidatesByProfile(findTsmIndexMatches(input), aircraftProfile)
+            indexRecord = chooseUniqueIndexRecord(matches, input)
+            if (indexRecord == null && matches.size > 1) {
+                candidateRecords = matches
+                state = LineTsmState.AMBIGUOUS
+                note = "More than one TSM index record still matches the verified input. Additional real aircraft evidence/effectivity is required; no task is selected automatically."
+            }
+        }
+
         val cockpitMessage = input.cockpitMessage ?: indexRecord?.cockpitMessage
         val cockpitAta = input.cockpitAta ?: indexRecord?.cockpitAta
-        val cockpitSource = if (!input.cockpitMessage.isNullOrBlank()) "PFR" else if (indexRecord != null) "VERIFIED TSM INDEX" else "UNRESOLVED"
+        val cockpitSource = when {
+            !input.cockpitMessage.isNullOrBlank() -> "PFR / USER-VERIFIED ENTRY"
+            indexRecord != null -> "VERIFIED TSM INDEX"
+            else -> "UNRESOLVED"
+        }
 
         val mel = resolveMel(cockpitMessage, cockpitAta, input.rawText, aircraftProfile)
         val tsm = indexRecord?.let { resolveTaskFromIndex(it, input, cockpitSource) }
+        if (tsm != null) {
+            state = LineTsmState.RESOLVED
+            note = "Unique TSM index mapping verified."
+        } else if (candidateRecords.isEmpty() && state == LineTsmState.NOT_FOUND) {
+            note = "No unique TSM Warnings/Malfunction index mapping was verified. Broad task guessing is disabled."
+        }
 
         val orderedHits = mutableListOf<SearchHit>()
         val seen = linkedSetOf<String>()
@@ -215,18 +315,218 @@ class LineAssistantEngine(
             supportHits(tsm, input).forEach(::add)
         }
 
+        val publicCandidates = candidateRecords.distinctBy {
+            "${it.indexTaskRef}|${it.maintenanceAta}|${normalizeText(it.maintenanceMessage)}|${it.source}|${it.faultClass}"
+        }.map(::toPublicCandidate)
+
         return LineAssistantResult(
-            summary = buildSummary(input, mel, tsm, aircraftProfile),
+            summary = buildSummary(input, mel, tsm, aircraftProfile, publicCandidates, state, note),
             safetySummary = buildSafety(mel, tsm, aircraftProfile),
             evidencePack = buildEvidencePacket(input, mel, tsm, orderedHits),
             hits = orderedHits,
             mel = mel,
             tsm = tsm,
-            structuredFault = input.parsedFault
+            structuredFault = input.parsedFault,
+            tsmCandidates = publicCandidates,
+            tsmState = state,
+            tsmNote = note
         )
     }
 
-    private fun findTsmIndexRecord(input: FaultInput): TsmIndexRecord? {
+    private fun isCockpitOnlyInput(input: FaultInput): Boolean {
+        val f = input.parsedFault ?: return false
+        if (f.category == "CMS FAULT MESSAGE") return false
+        return input.maintenanceAta.isNullOrBlank() && input.source.isNullOrBlank() &&
+            input.faultClass.isNullOrBlank() && f.ataFull.isNullOrBlank()
+    }
+
+    private fun toPublicCandidate(record: TsmIndexRecord) = LineTsmCandidate(
+        taskRef = record.indexTaskRef,
+        cockpitAta = record.cockpitAta,
+        cockpitMessage = record.cockpitMessage,
+        cockpitType = record.cockpitType,
+        maintenanceAta = record.maintenanceAta,
+        maintenanceMessage = record.maintenanceMessage,
+        source = record.source,
+        faultClass = record.faultClass,
+        identifiers = record.identifiers,
+        applicability = findTaskRow("TSM", record.indexTaskRef)?.applicability.orEmpty()
+    )
+
+    private fun filterTsmCandidatesByProfile(records: List<TsmIndexRecord>, aircraftProfile: String): List<TsmIndexRecord> {
+        if (records.size <= 1 || aircraftProfile.isBlank()) return records
+        val evaluated = records.map { record ->
+            val applicability = findTaskRow("TSM", record.indexTaskRef)?.applicability.orEmpty()
+            record to applicabilityMatch(applicability, aircraftProfile)
+        }
+        val matched = evaluated.filter { it.second == ApplicabilityMatch.MATCH }.map { it.first }
+        if (matched.isNotEmpty()) return matched
+        val notRejected = evaluated.filter { it.second != ApplicabilityMatch.NO_MATCH }.map { it.first }
+        return if (notRejected.isNotEmpty()) notRejected else records
+    }
+
+    private fun findCockpitTsmCandidates(input: FaultInput): List<TsmIndexRecord> {
+        val query = input.cockpitMessage?.takeIf { it.isNotBlank() } ?: input.maintenanceMessage
+        val words = significantWords(query)
+        if (words.isEmpty()) return emptyList()
+        val expressions = mutableListOf<String>()
+        expressions += words.take(5).joinToString(" AND ") { "\"$it\"*" }
+        expressions += words.take(5).joinToString(" OR ") { "\"$it\"*" }
+
+        val records = mutableListOf<TsmIndexRecord>()
+        val seen = linkedSetOf<String>()
+        for (expr in expressions.distinct()) {
+            runCatching {
+                db.rawQuery(
+                    """
+                    SELECT c.document_filename,c.pdf_page,c.content
+                    FROM chunks_fts f JOIN chunks c ON c.chunk_id=f.chunk_id
+                    WHERE chunks_fts MATCH ? AND UPPER(COALESCE(c.manual,''))='TSM'
+                    ORDER BY c.pdf_page LIMIT 240
+                    """.trimIndent(),
+                    arrayOf(expr)
+                ).use { c ->
+                    while (c.moveToNext()) {
+                        parseTsmIndexRecords(c.getString(0), c.getInt(1), c.getString(2)).forEach { r ->
+                            val key = "${r.indexTaskRef}|${r.maintenanceAta}|${r.maintenanceMessage}|${r.source}|${r.faultClass}"
+                            if (seen.add(key)) records += r
+                        }
+                    }
+                }
+            }
+        }
+
+        val requestedAta = input.cockpitAta?.let(::normalizeAta).orEmpty().take(4)
+        val matches = records.filter { r ->
+            val msg = normalizeText(r.cockpitMessage)
+            val msgOk = normalizeText(query) == msg ||
+                (words.all { containsWholeToken(msg, it) } && ocrMessageSimilarity(query, r.cockpitMessage) >= 0.90)
+            val ataOk = requestedAta.isBlank() || r.cockpitAta.isBlank() || normalizeAta(r.cockpitAta).take(4) == requestedAta
+            msgOk && ataOk && cockpitTypeMatches(input, r)
+        }
+        val cmsMatches = matches.filter { it.hasFaultMessage }
+        return (if (cmsMatches.isNotEmpty()) cmsMatches else matches)
+            .sortedWith(compareBy<TsmIndexRecord> { it.maintenanceMessage }.thenBy { it.indexTaskRef })
+    }
+
+    private fun sourceTokensEquivalent(observedRaw: String, trustedRaw: String): Boolean {
+        val a = normalizeToken(observedRaw)
+        val b = normalizeToken(trustedRaw)
+        if (a == b) return true
+        if (minOf(a.length, b.length) < 4 || kotlin.math.abs(a.length - b.length) > 1) return false
+        return referenceAwareLevenshtein(a, b) <= 1
+    }
+
+    private fun legacyFindDirectTsmTaskDisabled(input: FaultInput): TaskRow? {
+        if (input.parsedFault == null || input.maintenanceAta.isNullOrBlank() || input.maintenanceMessage.isBlank()) return null
+        val ids = (input.identifiers + extractIdentifiers(input.maintenanceMessage))
+            .map(::normalizeToken).filter { it.length >= 3 }.distinct()
+        val words = significantWords(input.maintenanceMessage)
+        val searchTerms = (ids + words).distinct().take(6)
+        if (searchTerms.isEmpty()) return null
+
+        val expressions = mutableListOf<String>()
+        if (ids.isNotEmpty()) expressions += ids.take(3).joinToString(" AND ") { "\"$it\"" }
+        if (words.isNotEmpty()) expressions += words.take(4).joinToString(" AND ") { "\"$it\"*" }
+        expressions += searchTerms.joinToString(" OR ") { "\"$it\"*" }
+
+        val candidates = linkedMapOf<String, TaskRow>()
+        for (expr in expressions.distinct()) {
+            runCatching {
+                db.rawQuery(
+                    """
+                    SELECT DISTINCT c.document_filename,c.pdf_page
+                    FROM chunks_fts f JOIN chunks c ON c.chunk_id=f.chunk_id
+                    WHERE chunks_fts MATCH ? AND UPPER(COALESCE(c.manual,''))='TSM'
+                    ORDER BY c.pdf_page LIMIT 120
+                    """.trimIndent(),
+                    arrayOf(expr)
+                ).use { c ->
+                    while (c.moveToNext()) {
+                        val filename = c.getString(0)
+                        val page = c.getInt(1)
+                        taskRowsNearPage(filename, page).forEach { task ->
+                            if (!candidates.containsKey(task.taskId)) {
+                                val content = exactTaskContent(task)
+                                if (directTaskContentMatches(content, input)) candidates[task.taskId] = task
+                            }
+                        }
+                    }
+                }
+            }
+            if (candidates.size > 1) break
+        }
+        return if (candidates.size == 1) candidates.values.first() else null
+    }
+
+    private fun taskRowsNearPage(filename: String, page: Int): List<TaskRow> {
+        val out = mutableListOf<TaskRow>()
+        runCatching {
+            db.rawQuery(
+                """
+                SELECT t.task_id,d.filename,t.task_ref,COALESCE(t.task_title,''),t.start_pdf_page,
+                       COALESCE(t.end_pdf_page,t.start_pdf_page),COALESCE(t.selected_applicability,'')
+                FROM task_entries t JOIN documents d ON d.document_id=t.document_id
+                WHERE UPPER(COALESCE(d.manual,''))='TSM' AND d.filename=?
+                  AND t.start_pdf_page BETWEEN ? AND ?
+                ORDER BY t.start_pdf_page DESC,t.task_ref
+                LIMIT 24
+                """.trimIndent(),
+                arrayOf(filename, (page - 3).coerceAtLeast(1).toString(), page.toString())
+            ).use { c ->
+                while (c.moveToNext()) {
+                    out += TaskRow(c.getString(0), c.getString(1), c.getString(2), c.getString(3), c.getInt(4), c.getInt(5), c.getString(6))
+                }
+            }
+        }
+        return out
+    }
+
+    private fun directTaskContentMatches(content: String, input: FaultInput): Boolean {
+        val upper = normalizeText(content)
+        if (!upper.contains("FAULT ISOLATION")) return false
+
+        val ataDigits = normalizeAta(input.maintenanceAta.orEmpty()).take(6)
+        if (ataDigits.length == 6) {
+            val compactContent = upper.replace(Regex("[^A-Z0-9]"), "")
+            if (!compactContent.contains(ataDigits)) return false
+        }
+
+        val ids = (input.identifiers + extractIdentifiers(input.maintenanceMessage))
+            .map(::normalizeToken).filter { it.length >= 3 }.distinct()
+        if (ids.isNotEmpty() && ids.any { !containsWholeToken(upper, it) }) return false
+
+        val branches = Regex("(?im)maintenance message\\s*:?\\s*([^\\n\\r]{2,100})")
+            .findAll(content).map { it.groupValues[1].trim().trimEnd(':', '.', ';') }.toList()
+        if (branches.isEmpty()) return false
+        return branches.any { candidate -> ocrMessageSimilarity(input.maintenanceMessage, candidate) >= 0.94 }
+    }
+
+    private fun legacyResolveDirectTaskDisabled(task: TaskRow, input: FaultInput, cockpitSource: String): LineTsmResolution? {
+        val content = exactTaskContent(task)
+        if (!directTaskContentMatches(content, input)) return null
+        val branch = selectTroubleshootingBranch(content, input)
+        return LineTsmResolution(
+            indexTaskRef = task.reference,
+            taskRef = task.reference,
+            taskTitle = task.title,
+            indexPage = task.startPage,
+            taskStartPage = task.startPage,
+            taskEndPage = task.endPage,
+            cockpitMessage = input.cockpitMessage.orEmpty(),
+            cockpitAta = input.cockpitAta.orEmpty(),
+            maintenanceMessage = input.maintenanceMessage,
+            maintenanceAta = input.maintenanceAta.orEmpty(),
+            source = input.source.orEmpty(),
+            faultClass = input.faultClass.orEmpty(),
+            identifiers = (input.identifiers + extractIdentifiers(input.maintenanceMessage)).distinct(),
+            taskContent = content,
+            branch = branch,
+            cockpitEffectSource = cockpitSource
+        )
+    }
+
+    private fun findTsmIndexMatches(input: FaultInput): List<TsmIndexRecord> {
         val ids = (input.identifiers + extractIdentifiers(input.maintenanceMessage))
             .map(::normalizeToken).filter { it.length >= 3 }.distinct()
         val words = significantWords(input.maintenanceMessage)
@@ -240,6 +540,28 @@ class LineAssistantEngine(
 
         val candidates = mutableListOf<TsmIndexRecord>()
         val dedupe = linkedSetOf<String>()
+
+        val exactAta = input.maintenanceAta?.trim().orEmpty()
+        if (exactAta.matches(Regex("\\d{2}-\\d{2}-\\d{2}"))) {
+            val sqlAta = """
+                SELECT c.document_filename,c.pdf_page,c.content
+                FROM chunks c
+                WHERE UPPER(COALESCE(c.manual,''))='TSM'
+                  AND UPPER(c.content) LIKE ?
+                ORDER BY c.pdf_page LIMIT 240
+            """.trimIndent()
+            runCatching {
+                db.rawQuery(sqlAta, arrayOf("%${exactAta.uppercase(Locale.US)}%")).use { c ->
+                    while (c.moveToNext()) {
+                        parseTsmIndexRecords(c.getString(0), c.getInt(1), c.getString(2)).forEach { record ->
+                            val key = "${record.indexFilename}|${record.indexPage}|${record.indexTaskRef}|${record.maintenanceMessage}|${record.cockpitMessage}|${record.source}"
+                            if (dedupe.add(key)) candidates += record
+                        }
+                    }
+                }
+            }
+        }
+
         for (expr in expressions.filter { it.isNotBlank() }) {
             val sql = """
                 SELECT c.document_filename,c.pdf_page,c.content
@@ -260,13 +582,24 @@ class LineAssistantEngine(
             if (candidates.any { exactIndexMatch(it, input) }) break
         }
 
-        val matched = candidates.filter { acceptableIndexMatch(it, input) }
-        if (matched.isEmpty()) return null
-        val scored = matched.map { it to indexScore(it, input) }.sortedByDescending { it.second }
+        return candidates
+            .filter { acceptableIndexMatch(it, input) && pfrPhotoMatchIsStrong(it, input) }
+            .distinctBy { "${it.indexTaskRef}|${it.maintenanceAta}|${normalizeText(it.maintenanceMessage)}|${it.source}|${it.faultClass}" }
+            .sortedByDescending { indexScore(it, input) }
+    }
+
+    private fun chooseUniqueIndexRecord(matches: List<TsmIndexRecord>, input: FaultInput): TsmIndexRecord? {
+        if (matches.isEmpty()) return null
+        val scored = matches.map { it to indexScore(it, input) }.sortedByDescending { it.second }
         val best = scored.first()
-        val competing = scored.drop(1).firstOrNull { it.second == best.second && it.first.indexTaskRef != best.first.indexTaskRef }
+        val competing = scored.drop(1).firstOrNull {
+            it.second == best.second && it.first.indexTaskRef != best.first.indexTaskRef
+        }
         return if (competing == null) best.first else null
     }
+
+    private fun findTsmIndexRecord(input: FaultInput): TsmIndexRecord? =
+        chooseUniqueIndexRecord(findTsmIndexMatches(input), input)
 
     private fun parseTsmIndexRecords(filename: String, page: Int, content: String): List<TsmIndexRecord> {
         val lines = content.lines().map(::cleanLine).filter { it.isNotBlank() }
@@ -318,7 +651,7 @@ class LineAssistantEngine(
                 val ataIndex = payload.indexOfFirst { it.matches(Regex("\\d{2}-\\d{2}")) }
                 val cockpitAta = if (ataIndex >= 0) payload[ataIndex] else ""
                 val startMessage = if (ataIndex >= 0) ataIndex + 1 else 0
-                val knownTypes = listOf("OBSERVATIONS", "EWD WARNING(S)", "PFD FLAG(S)", "ND FLAG(S)", "STS-INOP SYSTEM")
+                val knownTypes = listOf("OBSERVATIONS", "EWD WARNING(S)", "PFD FLAG(S)", "ND FLAG(S)", "STS-INOP SYSTEM", "STS-MAINTENANCE", "MAINTENANCE STATUS", "MAINT STATUS")
                 var joined = payload.drop(startMessage).joinToString(" ").trim()
                 val type = knownTypes.firstOrNull { joined.endsWith(it, true) }.orEmpty()
                 if (type.isNotBlank()) joined = joined.dropLast(type.length).trim()
@@ -330,6 +663,92 @@ class LineAssistantEngine(
         return out
     }
 
+    private fun pfrPhotoMatchIsStrong(record: TsmIndexRecord, input: FaultInput): Boolean {
+        if (input.parsedFault == null) return true
+
+        if (!record.hasFaultMessage) {
+            val q = input.cockpitMessage?.takeIf { it.isNotBlank() } ?: input.maintenanceMessage
+            return ocrMessageSimilarity(q, record.cockpitMessage) >= 0.94 && cockpitTypeMatches(input, record)
+        }
+
+        val requestedAta = input.maintenanceAta?.let(::normalizeAta).orEmpty()
+        if (requestedAta.length >= 6 && normalizeAta(record.maintenanceAta).take(6) != requestedAta.take(6)) return false
+
+        if (!input.source.isNullOrBlank() && record.source.isNotBlank() &&
+            !sourceTokensEquivalent(input.source, record.source)) return false
+
+        if (!input.faultClass.isNullOrBlank() && record.faultClass.isNotBlank() &&
+            input.faultClass.trim() != record.faultClass.trim()) return false
+
+        val inputIds = extractIdentifiers(input.maintenanceMessage)
+            .map(::normalizeToken)
+            .filter { it.length >= 3 }
+            .distinct()
+        val recordText = normalizeText(record.maintenanceMessage + " " + record.identifiers.joinToString(" "))
+        if (inputIds.isNotEmpty() && inputIds.any { !containsWholeToken(recordText, it) }) return false
+
+        return ocrMessageSimilarity(input.maintenanceMessage, record.maintenanceMessage) >= 0.94
+    }
+
+    // DB-aware OCR comparison. The reference side is the trusted TSM index text.
+    // A slash may be misread by OCR as I/L/|/1, but those characters are never
+    // globally rewritten. They are treated as equivalent only when aligned to
+    // an actual '/' in the verified TSM reference.
+    private fun ocrMessageSimilarity(observedRaw: String, referenceRaw: String): Double {
+        val observed = ocrComparable(observedRaw)
+        val reference = ocrComparable(referenceRaw)
+        if (observed.isBlank() || reference.isBlank()) return 0.0
+        if (observed == reference) return 1.0
+        if (minOf(observed.length, reference.length) < 8) return 0.0
+        val distance = referenceAwareLevenshtein(observed, reference)
+        return 1.0 - distance.toDouble() / maxOf(observed.length, reference.length).toDouble()
+    }
+
+    private fun ocrComparable(raw: String): String = normalizeText(raw)
+        .filterNot { it.isWhitespace() }
+        .replace(Regex("[^A-Z0-9/|]"), "")
+
+    private fun referenceAwareLevenshtein(observed: String, reference: String): Int {
+        var previous = IntArray(reference.length + 1) { it }
+        var current = IntArray(reference.length + 1)
+        for (i in 1..observed.length) {
+            current[0] = i
+            for (j in 1..reference.length) {
+                val o = observed[i - 1]
+                val r = reference[j - 1]
+                val separatorAlias = r == '/' && (o == 'I' || o == 'L' || o == '|' || o == '1')
+                val cost = if (o == r || separatorAlias) 0 else 1
+                current[j] = minOf(
+                    current[j - 1] + 1,
+                    previous[j] + 1,
+                    previous[j - 1] + cost
+                )
+            }
+            val temp = previous
+            previous = current
+            current = temp
+        }
+        return previous[reference.length]
+    }
+
+    private fun cockpitTypeMatches(input: FaultInput, record: TsmIndexRecord): Boolean {
+        val requested = input.parsedFault?.cockpitType.orEmpty().trim()
+        if (requested.isBlank() || record.cockpitType.isBlank()) return true
+        fun canonical(value: String): String {
+            val compact = normalizeText(value).replace(Regex("[^A-Z]"), "")
+            return when {
+                compact.contains("MAINTENANCESTATUS") || compact.contains("MAINTSTATUS") || compact.contains("STSMAINTENANCE") -> "MAINTENANCESTATUS"
+                compact.contains("EWDWARNING") || compact.contains("ECAMWARNING") -> "EWDWARNING"
+                compact.contains("STSINOPSYSTEM") -> "STSINOPSYSTEM"
+                compact.contains("PFDFLAG") -> "PFDFLAG"
+                compact.contains("NDFLAG") -> "NDFLAG"
+                compact.contains("SDFLAG") -> "SDFLAG"
+                else -> compact
+            }
+        }
+        return canonical(requested) == canonical(record.cockpitType)
+    }
+
     private fun acceptableIndexMatch(record: TsmIndexRecord, input: FaultInput): Boolean {
         if (!record.hasFaultMessage) {
             val query = input.cockpitMessage?.takeIf { it.isNotBlank() } ?: input.maintenanceMessage
@@ -338,35 +757,68 @@ class LineAssistantEngine(
             val msgOk = qWords.isNotEmpty() && qWords.all { containsWholeToken(hay, it) }
             val qAta = input.cockpitAta ?: input.maintenanceAta
             val ataOk = qAta.isNullOrBlank() || record.cockpitAta.isBlank() || normalizeAta(qAta).take(4) == normalizeAta(record.cockpitAta).take(4)
-            return msgOk && ataOk
+            val typeOk = cockpitTypeMatches(input, record)
+            return msgOk && ataOk && typeOk
         }
 
+        // Maintenance ATA is the strongest field printed in the CMS row: never relax it.
         val ataOk = input.maintenanceAta.isNullOrBlank() || normalizeAta(input.maintenanceAta) == normalizeAta(record.maintenanceAta)
         if (!ataOk) return false
-        val requestedIds = (input.identifiers + extractIdentifiers(input.maintenanceMessage))
-            .map(::normalizeToken).filter { it.length >= 3 }.distinct()
-        val recordText = normalizeText(record.maintenanceMessage + " " + record.identifiers.joinToString(" "))
-        if (requestedIds.isNotEmpty() && requestedIds.any { !containsWholeToken(recordText, it) }) return false
-        val a = baseFaultMessage(input.maintenanceMessage)
-        val b = baseFaultMessage(record.maintenanceMessage)
-        val words = significantWords(a)
-        val messageOk = a == b || (words.isNotEmpty() && words.all { containsWholeToken(normalizeText(b), it) })
-        if (!messageOk) return false
+
+        // Source and class are also structured CMS fields. If both sides have them they must agree.
         if (!input.source.isNullOrBlank() && record.source.isNotBlank() && normalizeToken(input.source) != normalizeToken(record.source)) return false
+        if (!input.faultClass.isNullOrBlank() && record.faultClass.isNotBlank() && input.faultClass.trim() != record.faultClass.trim()) return false
+
+        // Only identifiers actually printed in the PFR Identifiers column are a gate.
+        // Message-internal FINs are evidence, not mandatory exact identifiers.
+        val printedIds = input.identifiers.map(::normalizeToken).filter { it.length >= 3 }.distinct()
+        val recordEvidence = normalizeText(record.maintenanceMessage + " " + record.identifiers.joinToString(" "))
+        if (printedIds.isNotEmpty() && printedIds.none { containsWholeToken(recordEvidence, it) }) return false
+
+        if (!cmsMessageCompatible(input.maintenanceMessage, record.maintenanceMessage)) return false
         return true
+    }
+
+    private fun cmsMessageCompatible(query: String, candidate: String): Boolean {
+        val q = baseFaultMessage(query)
+        val c = baseFaultMessage(candidate)
+        if (q == c) return true
+
+        val qWords = significantWords(q).map(::normalizeToken).filter { it.length >= 3 }.distinct()
+        val cNorm = normalizeText(c)
+        if (qWords.isEmpty()) return false
+        val exactWordMatches = qWords.count { containsWholeToken(cNorm, it) }
+        val coverage = exactWordMatches.toDouble() / qWords.size.toDouble()
+
+        // FIN/equipment references such as 2CE2/67CE2 are strong independent evidence.
+        val qRefs = strongCmsRefs(q)
+        val cRefs = strongCmsRefs(c)
+        val refOverlap = qRefs.intersect(cRefs).size
+
+        // One OCR-damaged token is acceptable only when most of the message agrees,
+        // or when at least two independent hardware references agree.
+        return coverage >= 0.66 || (coverage >= 0.50 && refOverlap >= 1) || refOverlap >= 2
+    }
+
+    private fun strongCmsRefs(text: String): Set<String> {
+        val upper = normalizeText(text)
+        val out = linkedSetOf<String>()
+        Regex("\\b\\d{1,3}[A-Z]{2,5}\\d{0,3}\\b").findAll(upper).forEach { out += normalizeToken(it.value) }
+        Regex("\\b(?:FCPC|FCSC|FCDC|LGCIU|BSCU|BMC|FMGEC|SFCC|SDAC|FWC|DMU|FDIMU)\\d*\\b").findAll(upper).forEach { out += normalizeToken(it.value) }
+        return out
     }
 
     private fun exactIndexMatch(record: TsmIndexRecord, input: FaultInput): Boolean {
         if (!record.hasFaultMessage) {
             val q = input.cockpitMessage?.takeIf { it.isNotBlank() } ?: input.maintenanceMessage
-            return normalizeText(q) == normalizeText(record.cockpitMessage)
+            return normalizeText(q) == normalizeText(record.cockpitMessage) && cockpitTypeMatches(input, record)
         }
         val exactMessage = normalizeText(input.maintenanceMessage) == normalizeText(record.maintenanceMessage)
         val ids = (input.identifiers + extractIdentifiers(input.maintenanceMessage))
             .map(::normalizeToken).filter { it.length >= 3 }.distinct()
         val recordText = normalizeText(record.maintenanceMessage + " " + record.identifiers.joinToString(" "))
         val idsOk = ids.isEmpty() || ids.all { containsWholeToken(recordText, it) }
-        val ataOk = input.maintenanceAta.isNullOrBlank() || normalizeAta(input.maintenanceAta) == normalizeAta(record.maintenanceAta)
+        val ataOk = ataCompatible(input.maintenanceAta, record.maintenanceAta)
         return exactMessage && idsOk && ataOk
     }
 
@@ -394,7 +846,14 @@ class LineAssistantEngine(
     private fun resolveTaskFromIndex(record: TsmIndexRecord, input: FaultInput, cockpitSource: String): LineTsmResolution? {
         val indexedTask = findTaskRow("TSM", record.indexTaskRef) ?: return null
         val indexedContent = exactTaskContent(indexedTask)
-        var branch = selectTroubleshootingBranch(indexedContent, input)
+        val branchInput = if (record.hasFaultMessage && input.parsedFault != null &&
+            ocrMessageSimilarity(input.maintenanceMessage, record.maintenanceMessage) >= 0.94) {
+            input.copy(
+                maintenanceMessage = record.maintenanceMessage,
+                identifiers = (input.identifiers + record.identifiers + extractIdentifiers(record.maintenanceMessage)).distinct()
+            )
+        } else input
+        var branch = selectTroubleshootingBranch(indexedContent, branchInput)
         var activeTask = indexedTask
         var activeContent = indexedContent
 
@@ -404,7 +863,7 @@ class LineAssistantEngine(
             if (redirected != null) {
                 activeTask = redirected
                 activeContent = exactTaskContent(redirected)
-                branch = selectTroubleshootingBranch(activeContent, input)
+                branch = selectTroubleshootingBranch(activeContent, branchInput)
             }
         }
 
@@ -483,15 +942,19 @@ class LineAssistantEngine(
         val paraRegex = Regex("(?is)(.{0,520}?)(?:PROCEDURE\\s+IN\\s+)?PARA\\.\\s*4\\s*\\.\\s*A\\s*\\.\\s*\\((\\d+)\\)")
         paraRegex.findAll(confirmation).forEach { m ->
             val window = normalizeText(m.groupValues[1])
-            mappings += Mapping(m.groupValues[2], null, mappingScore(window, ids, prefixes), window.takeLast(360))
+            val local = localSelectorClause(window)
+            mappings += Mapping(m.groupValues[2], null, mappingScore(local, ids, prefixes), local.takeLast(360))
         }
         val redirectRegex = Regex("(?is)(.{0,520}?)\\(REF\\.\\s*TSM\\s+(\\d{2}-\\d{2}-\\d{2}-810-\\d{3})\\)")
         redirectRegex.findAll(confirmation).forEach { m ->
             val window = normalizeText(m.groupValues[1])
-            mappings += Mapping(null, m.groupValues[2], mappingScore(window, ids, prefixes), window.takeLast(360))
+            val local = localSelectorClause(window)
+            mappings += Mapping(null, m.groupValues[2], mappingScore(local, ids, prefixes), local.takeLast(360))
         }
 
-        val best = mappings.filter { it.score > 0 }.maxByOrNull { it.score }
+        val best = mappings.filter { it.score > 0 }
+            .sortedWith(compareByDescending<Mapping> { it.score }.thenByDescending { if (it.redirect != null) 1 else 0 })
+            .firstOrNull()
         if (best?.redirect != null) {
             val evidence = listOf(possible, confirmation).filter { it.isNotBlank() }.joinToString("\n\n")
             return LineTroubleshootingBranch(best.selector, null, best.redirect, possible, confirmation, "", "", evidence)
@@ -530,6 +993,12 @@ class LineAssistantEngine(
         )
     }
 
+    private fun localSelectorClause(window: String): String {
+        val bullet = "· IF THE MESSAGE"
+        val idx = window.lastIndexOf(bullet)
+        return if (idx >= 0) window.substring(idx) else window
+    }
+
     private fun mappingScore(window: String, ids: List<String>, prefixes: List<String>): Int {
         var score = 0
         ids.forEach { if (containsWholeToken(window, it)) score += 80 }
@@ -565,19 +1034,6 @@ class LineAssistantEngine(
             val exact = findCompatibleMelEntries(cockpitMessage, cockpitAta)
             if (exact.isNotEmpty()) return chooseMelVariant(exact, aircraftProfile)
         }
-
-        val fallback = findEquipmentMelItem(rawText, cockpitAta)
-        if (fallback != null) {
-            return LineMelResolution(
-                status = LineDispatchStatus.VERIFY_REQUIRED,
-                title = fallback.reference + " — " + fallback.title,
-                ataChapter = fallback.reference.take(2),
-                page = repo.resolve(fallback)?.pdfPage,
-                exactBlock = fallback.snippet,
-                itemRefs = listOf(fallback.reference),
-                note = "No exact MEL ECAM entry was resolved. Equipment-level MEL candidate only; verify original MEL, conditions and effectivity."
-            )
-        }
         return LineMelResolution(
             LineDispatchStatus.NO_ENTRY,
             cockpitMessage ?: "No exact MEL entry",
@@ -585,7 +1041,7 @@ class LineAssistantEngine(
             null,
             "",
             emptyList(),
-            "No exact MEL entry confirmed. Absence of a match is never dispatch approval."
+            "No exact MEL cockpit/ECAM entry confirmed. Equipment-level guessing is disabled; absence of a match is never dispatch approval."
         )
     }
 
@@ -643,15 +1099,20 @@ class LineAssistantEngine(
             selectedByProfile = true
         }
 
-        val conditions = selected.itemRefs.flatMap { ref -> loadMelConditions(ref) }.distinctBy { it.conditionRef }
+        val conditions = selected.itemRefs.flatMap { ref -> loadMelConditions(ref, aircraftProfile) }
+            .distinctBy { "${it.conditionRef}|${it.applicability}|${normalizeText(it.requirements)}" }
         val profileNote = if (aircraftProfile.isBlank()) {
             "Effectivity not verified; original MEL applicability must be checked."
         } else {
             "Aircraft profile: $aircraftProfile. Selected applicability: ${selected.applicability.ifBlank { "not indexed" }}."
         }
-        val stateNote = if (conditions.size > 1 && selected.itemRefs.none { it.lastOrNull()?.isLetter() == true }) {
-            " Multiple MEL conditions/sub-items exist; aircraft state must select the applicable condition before dispatch."
-        } else ""
+        val hasConditionEffectivityVariants = conditions.groupBy { it.conditionRef }.any { (_, list) -> list.map { it.applicability }.distinct().size > 1 }
+        val stateNote = when {
+            selected.itemRefs.isNotEmpty() && conditions.isEmpty() -> " MEL item condition/effectivity was not uniquely resolved; verify the original item."
+            hasConditionEffectivityVariants && aircraftProfile.isBlank() -> " Multiple MEL condition effectivity variants exist; enter MSN/aircraft variant before selecting a condition."
+            conditions.size > 1 && selected.itemRefs.none { it.lastOrNull()?.isLetter() == true } -> " Multiple MEL conditions/sub-items exist; aircraft state must select the applicable condition before dispatch."
+            else -> ""
+        }
         val note = when (selected.status) {
             LineDispatchStatus.NO_DISPATCH -> "Exact MEL ECAM block states NO DISPATCH. $profileNote"
             LineDispatchStatus.MUST_BE_OPERATIVE -> "Exact MEL block requires the item to be operative. $profileNote"
@@ -697,8 +1158,9 @@ class LineAssistantEngine(
     private fun dispatchStatus(block: String, refs: List<String>): LineDispatchStatus {
         val upper = normalizeText(block)
         return when {
-            upper.contains("NO DISPATCH") && refs.isEmpty() -> LineDispatchStatus.NO_DISPATCH
             upper.contains("MUST BE OPERATIVE") -> LineDispatchStatus.MUST_BE_OPERATIVE
+            upper.contains("NO DISPATCH") && refs.isEmpty() -> LineDispatchStatus.NO_DISPATCH
+            upper.contains("NO DISPATCH") && refs.isNotEmpty() -> LineDispatchStatus.VERIFY_REQUIRED
             refs.isNotEmpty() -> LineDispatchStatus.CONDITIONAL
             upper.contains("MAY BE INOPERATIVE") -> LineDispatchStatus.CONDITIONAL
             else -> LineDispatchStatus.VERIFY_REQUIRED
@@ -707,7 +1169,7 @@ class LineAssistantEngine(
 
     private fun isolateMelBlock(content: String, title: String): String {
         val text = content.replace("\r", "")
-        val matches = Regex("(?im)^ECAM Alert:\\s*(.+?)\\s*$").findAll(text).toList()
+        val matches = Regex("(?im)^\\s*ECAM Alert:\\s*(.+?)\\s*$").findAll(text).toList()
         matches.forEachIndexed { i, m ->
             if (melTitleCompatible(title, m.groupValues[1])) {
                 val end = matches.getOrNull(i + 1)?.range?.first ?: text.length
@@ -717,7 +1179,7 @@ class LineAssistantEngine(
         return ""
     }
 
-    private fun parseApplicability(block: String): String = Regex("(?im)^Applicable to:\\s*(.+?)\\s*$")
+    private fun parseApplicability(block: String): String = Regex("(?im)^\\s*Applicable to:\\s*(.+?)\\s*$")
         .find(block)?.groupValues?.getOrNull(1)?.trim().orEmpty()
 
     private fun extractMelItemRefs(block: String): List<String> {
@@ -732,7 +1194,7 @@ class LineAssistantEngine(
         return out.toList()
     }
 
-    private fun loadMelConditions(requestedRef: String): List<LineMelCondition> {
+    private fun loadMelConditions(requestedRef: String, aircraftProfile: String): List<LineMelCondition> {
         val exactExists = scalarInt("SELECT COUNT(*) FROM mel_items WHERE UPPER(COALESCE(mel_ref,''))='${sqlSafe(requestedRef)}'") > 0
         val base = if (exactExists) requestedRef else requestedRef.removeSuffixLetter()
         val requestedCondition = if (!exactExists && requestedRef.length > base.length) requestedRef else null
@@ -745,8 +1207,12 @@ class LineAssistantEngine(
             db.rawQuery(sql, arrayOf(base.uppercase(Locale.US))).use { c ->
                 if (!c.moveToFirst()) return@use emptyList()
                 val content = exactMelItemContent(base, c.getString(1))
-                parseMelConditions(base, content, c.getString(2), c.getString(3), c.getString(4), c.getString(5))
+                val parsed = parseMelConditions(base, content, c.getString(2), c.getString(3), c.getString(4), c.getString(5))
                     .filter { requestedCondition == null || it.conditionRef.equals(requestedCondition, true) }
+                if (aircraftProfile.isBlank()) parsed else {
+                    val matched = parsed.filter { applicabilityMatch(it.applicability, aircraftProfile) == ApplicabilityMatch.MATCH }
+                    if (matched.isNotEmpty()) matched else emptyList()
+                }
             }
         }.getOrDefault(emptyList())
     }
@@ -769,7 +1235,7 @@ class LineAssistantEngine(
         val starts = lines.mapIndexedNotNull { i, line -> marker.find(line)?.let { i to it } }
         if (starts.isEmpty()) {
             return listOf(LineMelCondition(baseRef, "", fallbackInterval, fallbackInstalled, fallbackRequired, fallbackPlacard,
-                content.take(2200), emptyList(), emptyList()))
+                parseApplicability(content), content.take(2200), emptyList(), emptyList()))
         }
         val out = mutableListOf<LineMelCondition>()
         starts.forEachIndexed { index, pair ->
@@ -779,6 +1245,8 @@ class LineAssistantEngine(
             val segment = lines.subList(start, end)
             val conditionRef = baseRef + match.groupValues[1].uppercase(Locale.US)
             val title = match.groupValues.getOrNull(2).orEmpty().trim()
+            val applicability = lines.subList(0, start + 1).lastOrNull { it.trimStart().startsWith("Applicable to:", true) }
+                ?.substringAfter(':')?.trim().orEmpty()
             val header = segment.indexOfFirst { it.equals("Repair interval", true) }
             var interval = fallbackInterval
             var installed = fallbackInstalled
@@ -803,7 +1271,7 @@ class LineAssistantEngine(
                 .findAll(refsText).map { it.groupValues[1].uppercase(Locale.US) }.distinct().toList()
             val ammRefs = Regex("(?i)AMM\\s+Task\\s+(\\d{2}-\\d{2}-\\d{2}-\\d{3}-\\d{3}(?:-[A-Z]\\d*)?)")
                 .findAll(refsText).map { it.groupValues[1].uppercase(Locale.US) }.distinct().toList()
-            out += LineMelCondition(conditionRef, title, interval, installed, required, placard, requirements, procRefs, ammRefs)
+            out += LineMelCondition(conditionRef, title, interval, installed, required, placard, applicability, requirements, procRefs, ammRefs)
         }
         return out
     }
@@ -865,7 +1333,12 @@ class LineAssistantEngine(
             if (seen.add(key)) out += h
         }
 
-        val scoped = tsm.branch?.evidence?.takeIf { it.isNotBlank() } ?: tsm.taskContent
+        val scoped = tsm.branch?.let { branch ->
+            listOf(branch.isolation, branch.continuation)
+                .filter { it.isNotBlank() }
+                .joinToString("\n")
+                .takeIf { it.isNotBlank() }
+        } ?: tsm.taskContent
         val upper = scoped.uppercase(Locale.US)
         Regex("\\b(?:REF\\.\\s*)?AMM(?:\\s+TASK)?\\s+(\\d{2}-\\d{2}-\\d{2}-\\d{3}-\\d{3}(?:-[A-Z]\\d*)?)\\b")
             .findAll(upper).map { it.groupValues[1] }.distinct().take(18).forEach { taskHit(it, "AMM")?.let(::add) }
@@ -878,9 +1351,8 @@ class LineAssistantEngine(
 
         val ids = linkedSetOf<String>()
         ids += input.identifiers
-        ids += extractIdentifiers(input.maintenanceMessage)
-        ids += tsm.identifiers
-        ids += extractIdentifiers(scoped).take(12)
+        val scopedNorm = normalizeText(scoped)
+        ids += tsm.identifiers.filter { containsWholeToken(scopedNorm, normalizeToken(it)) }
         ids.filter { it.length >= 3 }.take(18).forEach { id ->
             awmIdentifierHit(id)?.let(::add)
             ipcIdentifierHit(id)?.let(::add)
@@ -966,7 +1438,7 @@ class LineAssistantEngine(
         return out
     }
 
-    private fun findEquipmentMelItem(rawText: String, cockpitAta: String?): SearchHit? {
+    private fun legacyFindEquipmentMelItemDisabled(rawText: String, cockpitAta: String?): SearchHit? {
         val upper = rawText.uppercase(Locale.US)
         if (upper.contains("APU")) return melItemHit("49-10-01")
         val chapter = cockpitAta?.take(2)?.filter(Char::isDigit)
@@ -987,8 +1459,8 @@ class LineAssistantEngine(
         return rows.sortedBy { it.score }.firstOrNull()
     }
 
-    private fun buildSummary(input: FaultInput, mel: LineMelResolution, tsm: LineTsmResolution?, profile: String): String = buildString {
-        append("LINE ASSISTANT 1.1 • DATABASE-NATIVE WORKFLOW\n\n")
+    private fun buildSummary(input: FaultInput, mel: LineMelResolution, tsm: LineTsmResolution?, profile: String, candidates: List<LineTsmCandidate>, state: LineTsmState, note: String): String = buildString {
+        append("LINE ASSISTANT 1.5.0 • CONSOLIDATED FAIL-CLOSED RESOLVER\n\n")
         input.parsedFault?.let { append("PFR STRUCTURED RECORD\n").append(it.displaySummary()).append("\n\n") }
 
         append("1 • MEL / DISPATCH\n")
@@ -1010,13 +1482,32 @@ class LineAssistantEngine(
             append(" | Interval ").append(c.repairInterval.ifBlank { "?" })
             append(" | Installed ").append(c.nbrInstalled.ifBlank { "?" })
             append(" | Required ").append(c.nbrRequired.ifBlank { "?" })
-            append(" | Placard ").append(c.placard.ifBlank { "?" }).append('\n')
+            append(" | Placard ").append(c.placard.ifBlank { "?" })
+            if (c.applicability.isNotBlank()) append(" | Applies ").append(c.applicability)
+            append('\n')
         }
         append(mel.note).append("\n\n")
 
         append("2 • TSM TROUBLESHOOTING\n")
-        if (tsm == null) {
-            append("Exact TSM Warnings/Malfunction mapping NOT RESOLVED. Broad TSM lists are suppressed.\n")
+        if (candidates.isNotEmpty()) {
+            append(when (state) {
+                LineTsmState.NEEDS_CMS -> "COCKPIT / STS ENTRY VERIFIED • ACTUAL CMS FAULT REQUIRED.\n"
+                LineTsmState.AMBIGUOUS -> "TSM MATCH REMAINS AMBIGUOUS • MORE VERIFIED AIRCRAFT DATA REQUIRED.\n"
+                else -> "TSM CANDIDATES REQUIRE VERIFICATION.\n"
+            })
+            append(note).append('\n')
+            append("Candidate index records: ").append(candidates.size).append('\n')
+            candidates.forEachIndexed { i, c ->
+                append(i + 1).append(") ").append(c.maintenanceAta).append(" • ")
+                    .append(c.maintenanceMessage)
+                if (c.source.isNotBlank()) append(" • Source ").append(c.source)
+                if (c.faultClass.isNotBlank()) append(" • Class ").append(c.faultClass)
+                if (c.applicability.isNotBlank()) append(" • Applies ").append(c.applicability)
+                append(" • ").append(c.taskRef).append('\n')
+            }
+        } else if (tsm == null) {
+            append("Exact TSM Warnings/Malfunction mapping NOT RESOLVED. Broad TSM lists and direct-task guessing are suppressed.\n")
+            if (note.isNotBlank()) append(note).append('\n')
         } else {
             append("Index mapping: ").append(tsm.indexTaskRef).append('\n')
             append("Verified task: ").append(tsm.taskRef).append(" — ").append(tsm.taskTitle).append('\n')
@@ -1057,7 +1548,8 @@ class LineAssistantEngine(
             mel.conditions.forEach { c ->
                 append(c.conditionRef).append(" ").append(c.title).append(" | Interval=").append(c.repairInterval)
                     .append(" Installed=").append(c.nbrInstalled).append(" Required=").append(c.nbrRequired)
-                    .append(" Placard=").append(c.placard).append('\n')
+                    .append(" Placard=").append(c.placard)
+                    .append(" Applicability=").append(c.applicability.ifBlank { "UNKNOWN" }).append('\n')
                 append(c.requirements.take(1800)).append("\n\n")
             }
         }
@@ -1126,6 +1618,18 @@ class LineAssistantEngine(
     private fun cleanLine(text: String): String = normalizeText(text)
     private fun normalizeToken(text: String): String = normalizeText(text).replace(" ", "")
     private fun normalizeAta(text: String): String = text.filter(Char::isDigit).take(6)
+
+    private fun ataCompatible(requested: String?, candidate: String): Boolean {
+        if (requested.isNullOrBlank()) return true
+        val r = normalizeAta(requested)
+        val c = normalizeAta(candidate)
+        return when {
+            r.length >= 6 -> c.take(6) == r.take(6)
+            r.length >= 4 -> c.take(4) == r.take(4)
+            r.length >= 2 -> c.take(2) == r.take(2)
+            else -> true
+        }
+    }
 
     private fun containsWholeToken(haystack: String, token: String): Boolean {
         if (token.isBlank()) return false

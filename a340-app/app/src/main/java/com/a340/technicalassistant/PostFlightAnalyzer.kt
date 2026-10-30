@@ -23,7 +23,8 @@ object PostFlightAnalyzer {
         val source: String? = null,
         val cockpitEffect: String? = null,
         val cockpitAta: String? = null,
-        val flightPhaseCode: String? = null
+        val flightPhaseCode: String? = null,
+        val cockpitType: String? = null
     ) {
         fun searchQuery(): String = buildString {
             // Only the maintenance message and its six-digit ATA are sent to TSM retrieval.
@@ -34,6 +35,7 @@ object PostFlightAnalyzer {
         }
 
         fun displaySummary(): String = buildString {
+            cockpitType?.let { append("COCKPIT TYPE: ").append(it).append('\n') }
             cockpitEffect?.let { append("COCKPIT EFFECT: ").append(it).append('\n') }
             cockpitAta?.let { append("COCKPIT ATA: ").append(it).append('\n') }
             utc?.let { append("UTC: ").append(formatUtc(it)).append('\n') }
@@ -42,12 +44,16 @@ object PostFlightAnalyzer {
                 flightPhaseCode?.let { code -> append(" (").append(code).append(')') }
                 append('\n')
             }
-            append("MAINTENANCE FAULT: ").append(text)
-            ataFull?.let { append("\nMAINT ATA: ").append(it) } ?: ata?.let { append("\nMAINT ATA: ").append(it) }
-            faultClass?.let { append("\nCLASS: ").append(it) }
-            persistence?.let { append("\nSTATUS: ").append(it) }
-            source?.let { append("\nSOURCE: ").append(it) }
-            if (identifiers.isNotEmpty()) append("\nIDENTIFIERS: ").append(identifiers.joinToString(", "))
+            val hasCms = category == "CMS FAULT MESSAGE" || !ataFull.isNullOrBlank() ||
+                !source.isNullOrBlank() || !faultClass.isNullOrBlank()
+            if (hasCms) {
+                append("CMS FAULT MESSAGE: ").append(text)
+                ataFull?.let { append("\nMAINT ATA: ").append(it) } ?: ata?.let { append("\nMAINT ATA: ").append(it) }
+                faultClass?.let { append("\nCLASS: ").append(it) }
+                persistence?.let { append("\nSTATUS: ").append(it) }
+                source?.let { append("\nSOURCE: ").append(it) }
+                if (identifiers.isNotEmpty()) append("\nIDENTIFIERS: ").append(identifiers.joinToString(", "))
+            }
         }
 
         override fun toString(): String = displaySummary()

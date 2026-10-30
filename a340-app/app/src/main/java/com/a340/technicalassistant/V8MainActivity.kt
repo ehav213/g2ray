@@ -512,7 +512,7 @@ class V8MainActivity : AppCompatActivity() {
         val dir = File(cacheDir, "camera").apply { mkdirs() }
         val f = File(dir, "v8_${photoMode.name.lowercase()}.jpg")
         photoUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", f)
-        takePhoto.launch(photoUri)
+        photoUri?.let { takePhoto.launch(it) }
     }
 
     private fun ocr(uri: Uri) {

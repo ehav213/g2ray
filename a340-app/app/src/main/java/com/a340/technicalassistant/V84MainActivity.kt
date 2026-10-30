@@ -429,7 +429,7 @@ class V84MainActivity : AppCompatActivity() {
     private fun capture() { if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) startCamera() else cameraPermission.launch(Manifest.permission.CAMERA) }
     private fun startCamera() {
         val f = File(File(cacheDir, "camera").apply { mkdirs() }, "v84_${photoMode.name.lowercase()}.jpg")
-        photoUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", f); takePhoto.launch(photoUri)
+        photoUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", f); photoUri?.let { takePhoto.launch(it) }
     }
     private fun ocr(uri: Uri) {
         status("OCR • READING IMAGE…"); appLog.i("OCR_START", "$photoMode | $uri")

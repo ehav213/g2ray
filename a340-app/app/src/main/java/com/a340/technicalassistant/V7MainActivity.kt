@@ -566,7 +566,7 @@ class V7MainActivity : AppCompatActivity() {
         })
         photoUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", f)
         logInfo("CAMERA_OPEN", mode.name)
-        takePhoto.launch(photoUri)
+        photoUri?.let { takePhoto.launch(it) }
     }
 
     private fun ocr(uri: Uri) {

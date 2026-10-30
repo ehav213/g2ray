@@ -253,7 +253,7 @@ class MainActivity : AppCompatActivity() {
         }
         val f = File(dir, filename)
         photoUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", f)
-        takePhoto.launch(photoUri)
+        photoUri?.let { takePhoto.launch(it) }
     }
 
     private fun runOcr(uri: Uri, mode: PhotoMode) {
