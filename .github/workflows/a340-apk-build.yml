@@ -61,6 +61,9 @@ jobs:
       - name: Apply Line Assistant 1.4.1 multi-entry manual sections and crop-first OCR
         working-directory: a340-app
         run: python lineassistant_v141_sections_manual_crop_patch.py
+      - name: Apply Line Assistant 1.4.1 nullable camera URI compile fix
+        working-directory: a340-app
+        run: python lineassistant_v141_compile_fix.py
       - name: Prepare clean patched 1.4.1 source snapshot
         shell: bash
         run: |
