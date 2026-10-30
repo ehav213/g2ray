@@ -13,7 +13,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: lineassistant-151-consolidate
+  group: lineassistant-151-source-final
   cancel-in-progress: true
 
 jobs:
@@ -59,4 +59,4 @@ jobs:
           git commit -m "Line Assistant 1.5.1: deskew OCR and verified AWM IPC"
           git push origin HEAD:a340-v7-local-llm
 
-# trigger: source-only consolidation to avoid workflow-token permission restriction
+# trigger: final source-only consolidation
