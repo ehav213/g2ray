@@ -61,6 +61,19 @@ jobs:
           PY
           python lineassistant_pc4_write_search.py
           python lineassistant_pc4_write_pdfindex.py
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('lineassistant_v145_pc5_complete_branch_sources.py')
+          s=p.read_text()
+          old1='subprocess.run(["git", "apply", "--check", "-"], cwd=ROOT, input=patch, check=True)'
+          old2='subprocess.run(["git", "apply", "-"], cwd=ROOT, input=patch, check=True)'
+          new1='subprocess.run(["git", "apply", "--check", "--directory=a340-app", "-"], cwd=ROOT.parent, input=patch, check=True)'
+          new2='subprocess.run(["git", "apply", "--directory=a340-app", "-"], cwd=ROOT.parent, input=patch, check=True)'
+          if old1 not in s or old2 not in s:
+              raise SystemExit('PC5 apply-path fix anchors missing')
+          p.write_text(s.replace(old1,new1).replace(old2,new2))
+          print('PC5 git-apply path fixed for repository root')
+          PY
           python lineassistant_v145_pc5_complete_branch_sources.py
 
       - name: Verify exact PC5 and frozen OCR/PFR
