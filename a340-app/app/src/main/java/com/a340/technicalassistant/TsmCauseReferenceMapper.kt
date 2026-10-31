@@ -4,7 +4,7 @@ import java.util.Locale
 
 /**
  * Maps one verified TSM Possible Cause to the action(s) that actually name that
- * component inside the Fault Isolation section. It deliberately ignores the
+ * component inside the Fault Isolation section.  It deliberately ignores the
  * Possible Causes list, reference tables and job set-up pages when assigning a
  * manual reference to a component.
  */
@@ -55,6 +55,9 @@ object TsmCauseReferenceMapper {
         }
         if (scored.isEmpty()) return Route(false, emptyList(), "", emptyList())
 
+        // Identifier matches are authoritative.  When a FIN appears in more than
+        // one Fault Isolation action, keep all of those actions so a test/check
+        // step and a later replacement step remain together.
         val idMatches = scored.filter { it.ids.isNotEmpty() }
         val selected = if (idMatches.isNotEmpty()) {
             idMatches
@@ -82,6 +85,9 @@ object TsmCauseReferenceMapper {
     }
 
     private fun actionBlocks(isolation: String): List<String> {
+        // Airbus TSM fault-isolation actions are normally top-level numbered
+        // steps: (1), (2), ... .  Keep each complete numbered step, including
+        // its nested (a)/(b) substeps and all REF lines.
         val numeric = Regex("(?m)^\\s*\\((\\d{1,3})\\)\\s+").findAll(isolation).toList()
         if (numeric.isNotEmpty()) {
             return numeric.mapIndexed { index, match ->
@@ -90,6 +96,7 @@ object TsmCauseReferenceMapper {
             }.filter { it.isNotBlank() }
         }
 
+        // Conservative fallback for revisions that use A./B. action headings.
         val alpha = Regex("(?m)^\\s*([A-Z])\\.\\s+").findAll(isolation).toList()
         if (alpha.isNotEmpty()) {
             return alpha.mapIndexed { index, match ->
