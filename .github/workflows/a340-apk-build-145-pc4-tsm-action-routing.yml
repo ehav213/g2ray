@@ -48,7 +48,20 @@ jobs:
           cd a340-app
           python lineassistant_v145_pc3_cause_routing.py
           python lineassistant_pc4_write_gradle.py
-          python lineassistant_pc4_write_engine.py
+          python - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, zlib
+          root = Path('.')
+          payload = ''.join((root / f'pc4_engine_payload_{i:02d}.txt').read_text().strip() for i in range(5))
+          data = zlib.decompress(base64.b64decode(payload))
+          expected = 'a4114243f4a2f25f1a0e1420f5e052cc58a348dfeda2cac763a4ef8a8ac775d6'
+          actual = hashlib.sha256(data).hexdigest()
+          if actual != expected:
+              raise SystemExit(f'PC4 Engine SHA mismatch: {actual}')
+          out = root / 'app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt'
+          out.write_bytes(data)
+          print('PC4 Engine reconstructed:', actual)
+          PY
           python lineassistant_pc4_write_search.py
           python lineassistant_pc4_write_pdfindex.py
 
@@ -59,30 +72,36 @@ jobs:
           from pathlib import Path
           import hashlib
           root=Path('a340-app')
-          gradle=(root/'app/build.gradle.kts').read_text()
-          engine=(root/'app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt').read_text()
-          search=(root/'app/src/main/java/com/a340/technicalassistant/SearchRepository.kt').read_text()
-          pdf=(root/'app/src/main/java/com/a340/technicalassistant/PdfIndex.kt').read_text()
-          mapper=(root/'app/src/main/java/com/a340/technicalassistant/TsmCauseReferenceMapper.kt').read_text()
-          test=(root/'app/src/test/java/com/a340/technicalassistant/TsmCauseReferenceMapperTest.kt').read_text()
+          gradle=root/'app/build.gradle.kts'
+          engine=root/'app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt'
+          search=root/'app/src/main/java/com/a340/technicalassistant/SearchRepository.kt'
+          pdf=root/'app/src/main/java/com/a340/technicalassistant/PdfIndex.kt'
+          mapper=root/'app/src/main/java/com/a340/technicalassistant/TsmCauseReferenceMapper.kt'
+          test=root/'app/src/test/java/com/a340/technicalassistant/TsmCauseReferenceMapperTest.kt'
           activity=root/'app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt'
           pfr=root/'app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt'
           post=root/'app/src/main/java/com/a340/technicalassistant/PostFlightAnalyzer.kt'
           filepaths=root/'app/src/main/res/xml/file_paths.xml'
-          atext=activity.read_text()
+          gtext=gradle.read_text(); etext=engine.read_text(); stext=search.read_text(); pdftext=pdf.read_text(); mtext=mapper.read_text(); ttext=test.read_text(); atext=activity.read_text()
           def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
           checks={
-            'version PC4':'versionName = "1.4.5-PC4"' in gradle and 'versionCode = 49' in gradle,
-            'TSM action mapper':'object TsmCauseReferenceMapper' in mapper and 'faultIsolationSection' in mapper,
-            'cause refs bound to Fault Isolation':'CAUSE-SPECIFIC REFERENCE FROM THE SAME TSM FAULT-ISOLATION ACTION' in engine,
-            'old global-distance routing removed':'val anchors = mutableListOf<Int>()' not in engine and 'RefCandidate' not in engine,
-            'IPC row-id open support':'hit.entityId.startsWith("IPC-"' in search and "('IPC-' || i.ipc_item_id)=?" in search,
-            'legacy IPC PN compatibility':'UPPER(i.part_number)=UPPER(?) OR UPPER(COALESCE(i.fin' in search,
-            'safe PDF normalized alias':'normalized_name' in pdf and 'meaningfulTokens' in pdf and 'wanted.size < 3' in pdf,
-            'PC4 regression fixture 8MK':'23-33-34-000-801' in test and '23-33-34-400-801' in test,
-            'PC4 regression fixture 115RH':'23-73-19-000-801' in test and '23-73-19-400-801' in test,
-            'PC4 regression fixture directors':'23-73-34-000-801' in test and '23-73-34-400-801' in test,
-            'PC3 IPC FIN logic retained':'IPC BLOCK CONTAINS TSM FIN' in engine and 'ATA + IPC NOMENCLATURE CANDIDATE' in engine,
+            'version PC4':'versionName = "1.4.5-PC4"' in gtext and 'versionCode = 49' in gtext,
+            'PC4 Gradle exact hash':sha(gradle)=='25214c75359391c7e022f6d12cfe3434d31eff61a83a352502fd0aad003e7945',
+            'PC4 Engine exact hash':sha(engine)=='a4114243f4a2f25f1a0e1420f5e052cc58a348dfeda2cac763a4ef8a8ac775d6',
+            'PC4 SearchRepository exact hash':sha(search)=='1d70c5b0dcbbf8fe80cbb20c04231396f9473b461d869adee44ba8736ba3b2f7',
+            'PC4 PdfIndex exact hash':sha(pdf)=='ce78b78406c2cd39c9fbf6fa11396dd2f258ec4db2e0abedd07b53e297e8763e',
+            'TSM action mapper':'object TsmCauseReferenceMapper' in mtext and 'faultIsolationSection' in mtext,
+            'TSM mapper exact hash':sha(mapper)=='38cea6a2c1fcf5280e17fed3612e3768d5fbdbe9096648d014ed64b036946d24',
+            'TSM test exact hash':sha(test)=='3e1a33b9b1047770e235b9fab8f170b0200d30a554d92e946c61d63deb666822',
+            'cause refs bound to Fault Isolation':'CAUSE-SPECIFIC REFERENCE FROM THE SAME TSM FAULT-ISOLATION ACTION' in etext,
+            'old global-distance routing removed':'val anchors = mutableListOf<Int>()' not in etext and 'RefCandidate' not in etext,
+            'IPC row-id open support':'hit.entityId.startsWith("IPC-"' in stext and "('IPC-' || i.ipc_item_id)=?" in stext,
+            'legacy IPC PN compatibility':'UPPER(i.part_number)=UPPER(?) OR UPPER(COALESCE(i.fin' in stext,
+            'safe PDF normalized alias':'normalized_name' in pdftext and 'meaningfulTokens' in pdftext and 'wanted.size < 3' in pdftext,
+            'PC4 regression fixture 8MK':'23-33-34-000-801' in ttext and '23-33-34-400-801' in ttext,
+            'PC4 regression fixture 115RH':'23-73-19-000-801' in ttext and '23-73-19-400-801' in ttext,
+            'PC4 regression fixture directors':'23-73-34-000-801' in ttext and '23-73-34-400-801' in ttext,
+            'PC3 IPC FIN logic retained':'IPC BLOCK CONTAINS TSM FIN' in etext and 'ATA + IPC NOMENCLATURE CANDIDATE' in etext,
             'PC2 gallery path retained':'ActivityResultContracts.OpenDocument()' in atext and 'cacheGalleryImage' in atext,
             'no 1.4.6 multipass':'PfrImagePreprocessor' not in atext,
             'no 1.5.x DB OCR corrector':'PfrDatabaseOcrCorrector' not in atext,
