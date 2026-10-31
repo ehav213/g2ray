@@ -1,0 +1,158 @@
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index 70a37bf..ff1732a 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -11,8 +11,8 @@ android {
+         applicationId = "com.a340.technicalassistant"
+         minSdk = 24
+         targetSdk = 35
+-        versionCode = 46
+-        versionName = "1.4.5-PC1"
++        versionCode = 47
++        versionName = "1.4.5-PC2"
+         ndk {
+             abiFilters += listOf("arm64-v8a")
+         }
+diff --git a/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt b/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt
+index 9e2849d..9622af6 100644
+--- a/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt
++++ b/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt
+@@ -106,11 +106,36 @@ class LineAssistantActivity : AppCompatActivity() {
+                 .onFailure { e -> ui { status("PDF INDEX FAILED • CHECK LOG"); appLog.e("PDF_INDEX_FAIL", e) } }
+         }
+     }
+-    private val galleryPicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+-        if (uri != null) startCrop(uri)
++    private val galleryPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
++        if (uri == null) {
++            status("IMAGE SELECTION CANCELLED")
++            return@registerForActivityResult
++        }
++        status("IMAGE RECEIVED • PREPARING CROP…")
++        runCatching {
++            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
++        }
++        io.execute {
++            runCatching { cacheGalleryImage(uri) }
++                .onSuccess { cached -> ui { startCrop(cached) } }
++                .onFailure { e -> ui {
++                    appLog.e("IMAGE_IMPORT_FAIL", e)
++                    status("IMAGE IMPORT FAILED • CHECK IMAGE FORMAT / ACCESS")
++                    toast("Could not import selected image")
++                } }
++        }
+     }
+     private val takePhoto = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+-        if (ok) photoUri?.let(::startCrop)
++        if (ok) {
++            val uri = photoUri
++            if (uri != null) startCrop(uri)
++            else {
++                status("CAMERA IMAGE URI MISSING")
++                toast("Camera image could not be opened")
++            }
++        } else {
++            status("CAMERA CAPTURE CANCELLED")
++        }
+     }
+     private val cropImage = registerForActivityResult(CropImageContract()) { result ->
+         if (result.isSuccessful) {
+@@ -573,7 +598,7 @@ class LineAssistantActivity : AppCompatActivity() {
+         AlertDialog.Builder(this)
+             .setTitle("Image source")
+             .setItems(arrayOf("CAMERA", "CHOOSE FROM PHONE / GALLERY")) { _, which ->
+-                if (which == 0) capture() else galleryPicker.launch("image/*")
++                if (which == 0) capture() else galleryPicker.launch(arrayOf("image/*"))
+             }
+             .show()
+     }
+@@ -589,25 +614,50 @@ class LineAssistantActivity : AppCompatActivity() {
+         photoUri?.let { takePhoto.launch(it) }
+     }
+ 
++    private fun cacheGalleryImage(uri: Uri): Uri {
++        val mime = contentResolver.getType(uri).orEmpty().lowercase()
++        val ext = when {
++            "png" in mime -> "png"
++            "webp" in mime -> "webp"
++            "heic" in mime || "heif" in mime -> "heic"
++            else -> "jpg"
++        }
++        val dir = File(cacheDir, "gallery").apply { mkdirs() }
++        val outFile = File(dir, "line_assistant_${photoMode.name.lowercase()}_${System.currentTimeMillis()}.$ext")
++        val input = contentResolver.openInputStream(uri) ?: error("Selected image stream is unavailable")
++        input.use { source ->
++            outFile.outputStream().use { target -> source.copyTo(target) }
++        }
++        require(outFile.length() > 0L) { "Selected image is empty" }
++        appLog.i("IMAGE_IMPORT_OK", "${outFile.length()} bytes • ${outFile.name}")
++        return FileProvider.getUriForFile(this, "$packageName.fileprovider", outFile)
++    }
++
+     private fun startCrop(uri: Uri) {
+         status("CROP IMAGE • SELECT THE PFR ROW / AREA TO READ")
+-        cropImage.launch(
+-            CropImageContractOptions(
+-                uri = uri,
+-                cropImageOptions = CropImageOptions(
+-                    guidelines = CropImageView.Guidelines.ON,
+-                    cropShape = CropImageView.CropShape.RECTANGLE,
+-                    fixAspectRatio = false,
+-                    multiTouchEnabled = true,
+-                    autoZoomEnabled = true,
+-                    initialCropWindowPaddingRatio = 0.02f,
+-                    activityTitle = if (photoMode == PhotoMode.PFR) "Crop PFR — tap USE" else "Crop image — tap USE",
+-                    cropMenuCropButtonTitle = "USE",
+-                    activityMenuIconColor = Color.parseColor("#0A84FF"),
+-                    outputCompressQuality = 100
++        runCatching {
++            cropImage.launch(
++                CropImageContractOptions(
++                    uri = uri,
++                    cropImageOptions = CropImageOptions(
++                        guidelines = CropImageView.Guidelines.ON,
++                        cropShape = CropImageView.CropShape.RECTANGLE,
++                        fixAspectRatio = false,
++                        multiTouchEnabled = true,
++                        autoZoomEnabled = true,
++                        initialCropWindowPaddingRatio = 0.02f,
++                        activityTitle = if (photoMode == PhotoMode.PFR) "Crop PFR — tap USE" else "Crop image — tap USE",
++                        cropMenuCropButtonTitle = "USE",
++                        activityMenuIconColor = Color.parseColor("#0A84FF"),
++                        outputCompressQuality = 100
++                    )
+                 )
+             )
+-        )
++        }.onFailure { e ->
++            appLog.e("IMAGE_CROP_LAUNCH_FAIL", e)
++            status("CROP COULD NOT OPEN • CHECK IMAGE / TRY AGAIN")
++            toast("Could not open crop screen")
++        }
+     }
+ 
+     private fun ocr(uri: Uri) {
+@@ -630,7 +680,12 @@ class LineAssistantActivity : AppCompatActivity() {
+                     .addOnFailureListener { e -> status("OCR FAILED • CHECK LOG"); appLog.e("OCR_FAIL", e) }
+                     .addOnCompleteListener { recognizer.close() }
+             }
+-            .onFailure { e -> recognizer.close(); appLog.e("OCR_IMAGE_FAIL", e) }
++            .onFailure { e ->
++                recognizer.close()
++                appLog.e("OCR_IMAGE_FAIL", e)
++                status("OCR IMAGE OPEN FAILED • CHECK IMAGE FORMAT / ACCESS")
++                toast("Could not open image for OCR")
++            }
+     }
+ 
+     private fun handlePfrOcr(result: Text) {
+diff --git a/app/src/main/res/xml/file_paths.xml b/app/src/main/res/xml/file_paths.xml
+index 28f159b..8e78ab6 100644
+--- a/app/src/main/res/xml/file_paths.xml
++++ b/app/src/main/res/xml/file_paths.xml
+@@ -1,4 +1,5 @@
+ <paths xmlns:android="http://schemas.android.com/apk/res/android">
+     <cache-path name="camera" path="camera/" />
++    <cache-path name="gallery" path="gallery/" />
+     <cache-path name="source_packet" path="source_packet/" />
+ </paths>
