@@ -1,0 +1,176 @@
+name: Build Line Assistant 1.4.5-PC6 Authoritative ECAM CMS
+
+on:
+  push:
+    branches: [ lineassistant-145-pc6-authoritative-ecam-cms ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Reconstruct exact PC5 runtime and apply PC6
+        working-directory: a340-app
+        shell: bash
+        run: |
+          python lineassistant_v111_runtime_patch.py
+          python lineassistant_v120_pfr_patch.py
+          python lineassistant_v130_pfr_strict_patch.py
+          python lineassistant_v131_compile_fix.py
+          python lineassistant_v132_version_patch.py
+          python lineassistant_v133_output_cleanup_patch.py
+          python lineassistant_v134_task_range_patch.py
+          python lineassistant_v135_pfr_element_split_patch.py
+          python lineassistant_v135_compile_fix.py
+          python lineassistant_v136_universal_pfr_patch.py
+          python lineassistant_v137_pfr_structured_editor_patch.py
+          python lineassistant_v138_patchfix.py
+          python lineassistant_v138_entrypoint_classification_patch.py
+          python lineassistant_v139_exact_ecam_classification_patch.py
+          python lineassistant_v140_cms_index_match_patch.py
+          python lineassistant_v141_sections_manual_crop_patch.py
+          python lineassistant_v141_compile_fix.py
+          python lineassistant_v142_unified_ios_patch.py
+          python lineassistant_v142_xml_fix.py
+          python lineassistant_v143_crop_confirm_toolbar_patch.py
+          python lineassistant_v144_cockpit_only_pfr_patch.py
+          python lineassistant_v145_cms_candidate_selector_patch.py
+          cd ..
+          git apply --check --directory=a340-app a340-app/lineassistant_145_pc1.patch
+          git apply --directory=a340-app a340-app/lineassistant_145_pc1.patch
+          git apply --check --directory=a340-app a340-app/lineassistant_145_pc2_photo_fix.patch
+          git apply --directory=a340-app a340-app/lineassistant_145_pc2_photo_fix.patch
+          cd a340-app
+          python lineassistant_v145_pc3_cause_routing.py
+          python lineassistant_pc4_write_gradle.py
+          python - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, zlib
+          payload=''.join(Path(f'pc4_engine_payload_{i:02d}.txt').read_text().strip() for i in range(5))
+          data=zlib.decompress(base64.b64decode(payload))
+          expected='a4114243f4a2f25f1a0e1420f5e052cc58a348dfeda2cac763a4ef8a8ac775d6'
+          actual=hashlib.sha256(data).hexdigest()
+          assert actual==expected,(actual,expected)
+          Path('app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt').write_bytes(data)
+          print('PC4 Engine',actual)
+          PY
+          python lineassistant_pc4_write_search.py
+          python lineassistant_pc4_write_pdfindex.py
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('lineassistant_v145_pc5_complete_branch_sources.py')
+          s=p.read_text()
+          old1='subprocess.run(["git", "apply", "--check", "-"], cwd=ROOT, input=patch, check=True)'
+          old2='subprocess.run(["git", "apply", "-"], cwd=ROOT, input=patch, check=True)'
+          new1='subprocess.run(["git", "apply", "--check", "--directory=a340-app", "-"], cwd=ROOT.parent, input=patch, check=True)'
+          new2='subprocess.run(["git", "apply", "--directory=a340-app", "-"], cwd=ROOT.parent, input=patch, check=True)'
+          if old1 not in s or old2 not in s:
+              raise SystemExit('PC5 apply-path fix anchors missing')
+          p.write_text(s.replace(old1,new1).replace(old2,new2))
+          PY
+          python lineassistant_v145_pc5_complete_branch_sources.py
+          python lineassistant_v145_pc6_authoritative_index.py
+
+      - name: Verify exact PC6 and frozen OCR/PFR
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          r=Path('a340-app')
+          def h(p): return hashlib.sha256((r/p).read_bytes()).hexdigest()
+          exact={
+            'app/build.gradle.kts':'2bed173ea0fd7a913d8cb77a3a5eb1660f1b92a902a5313be4356f67bd49f1f5',
+            'app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt':'7c58c9f8739b017fb1cae16e75bd7990363bc856dcd5490a3369bc654273856b',
+            'app/src/main/java/com/a340/technicalassistant/TsmFirstEntryPolicy.kt':'6812b76836e13bebc2403cd4047194f4e275508812483b47a6bccade3554fad1',
+            'app/src/test/java/com/a340/technicalassistant/TsmFirstEntryPolicyTest.kt':'09d1cf711490a3172d8afd16a9e31c81ef3f4b5d769313cff97a27aaada5554e',
+            'app/src/main/java/com/a340/technicalassistant/SearchRepository.kt':'1d70c5b0dcbbf8fe80cbb20c04231396f9473b461d869adee44ba8736ba3b2f7',
+            'app/src/main/java/com/a340/technicalassistant/PdfIndex.kt':'ce78b78406c2cd39c9fbf6fa11396dd2f258ec4db2e0abedd07b53e297e8763e',
+            'app/src/main/java/com/a340/technicalassistant/TsmCauseReferenceMapper.kt':'ab1b051b07626006110bb862aeb3e697f549b625be7434c11a5e2a6dbb72e791',
+            'app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt':'37ec455724a3a6071602dc187a224b2e673722194cf977785a8aa63ecb28da62',
+            'app/src/main/java/com/a340/technicalassistant/PostFlightAnalyzer.kt':'99a2fff778a1bc3512b2d38f627c5a568a2a627109bd7e3b7e1ff35964223860',
+            'app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt':'87b7857463e9f6edae79330e0ada41967a2a777ee0026a00c68f61f616073a91',
+            'app/src/main/res/xml/file_paths.xml':'598f95b41cadf9a3d8f7f379b2ca28f03e61e4e55ba02b10b1ef291cb4e63079',
+          }
+          for p,e in exact.items():
+            a=h(p); print(('PASS ' if a==e else 'FAIL ')+p)
+            if a!=e: raise SystemExit(f'{p}: {a} != {e}')
+          g=(r/'app/build.gradle.kts').read_text()
+          e=(r/'app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt').read_text()
+          assert 'versionName = "1.4.5-PC6"' in g and 'versionCode = 51' in g
+          assert 'AUTHORITATIVE ECAM + CMS TASK LOCK' in e
+          assert 'TsmFirstEntryPolicy.shouldUseCockpitIndex' in e
+          assert 'exactCockpitMatches' in e
+          assert 'exactCockpitExists -> null' in e
+          assert 'input.cockpitMessage?.takeIf' in e
+          print('PASS PC6 authoritative first-entry markers')
+          PY
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android 35 SDK
+        shell: bash
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Run PC6 regression tests
+        working-directory: a340-app
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:testDebugUnitTest --stacktrace
+
+      - name: Build debug APK
+        working-directory: a340-app
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify APK packaging
+        shell: bash
+        run: |
+          unzip -l a340-app/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
+          test -s a340-app/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Prepare artifacts
+        shell: bash
+        run: |
+          cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.4.5-PC6.apk
+          sha256sum LineAssistant-1.4.5-PC6.apk | tee LineAssistant-1.4.5-PC6.sha256
+          rm -rf a340-app/.gradle a340-app/app/build a340-app/build a340-app/.idea
+          rm -f a340-app/local.properties
+
+      - name: Upload source
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.5-PC6-Source
+          path: a340-app/
+          if-no-files-found: error
+          include-hidden-files: true
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.5-PC6
+          path: |
+            LineAssistant-1.4.5-PC6.apk
+            LineAssistant-1.4.5-PC6.sha256
+          if-no-files-found: error
