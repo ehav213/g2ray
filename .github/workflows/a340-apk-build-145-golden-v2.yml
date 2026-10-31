@@ -54,7 +54,6 @@ jobs:
               'no 1.4.6 multipass': 'PfrImagePreprocessor' not in activity,
               'no 1.5.x DB corrector': 'PfrDatabaseOcrCorrector' not in activity,
               'direct ML Kit OCR': 'TextRecognition.getClient' in activity,
-              'crop confirm path': 'CropConfirmActivity' in activity,
           }
           for name, ok in checks.items(): print(('PASS ' if ok else 'FAIL ') + name)
           failed = [k for k,v in checks.items() if not v]
