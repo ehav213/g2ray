@@ -90,14 +90,20 @@ jobs:
             'app/build.gradle.kts':'ad90f41c3dd23fa50b72eff9fd0ad009ec80045131a8a3983ac4f9dd9b0af5af',
             'app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt':'fd9a4e8aa0dfd1d4d45b48997af5f08c9a96040591ca6487aa9714fdde4ed578',
             'app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt':'dd24ab667ab83258e4deb966efa1f320d8ea136c66f7460649fe2169fb8361dc',
-            'app/src/main/java/com/a340/technicalassistant/TsmSymptomIndexParser.kt':'c5bd74e15ac6fd703c7e7252d26be395bcc42718a33a198884763cb9fc0dbc3c',
-            'app/src/test/java/com/a340/technicalassistant/TsmSymptomIndexParserTest.kt':'a6a77817941d5baed54d3af28138a4f3b8bd479f47ebfd0d421c5d6614baf614',
             'app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt':'37ec455724a3a6071602dc187a224b2e673722194cf977785a8aa63ecb28da62',
             'app/src/main/java/com/a340/technicalassistant/PostFlightAnalyzer.kt':'99a2fff778a1bc3512b2d38f627c5a568a2a627109bd7e3b7e1ff35964223860',
           }
           for p,e in exact.items():
             a=h(p); print(('PASS ' if a==e else 'FAIL ')+p)
             if a!=e: raise SystemExit(f'{p}: {a} != {e}')
+          parser=(r/'app/src/main/java/com/a340/technicalassistant/TsmSymptomIndexParser.kt').read_text()
+          tests=(r/'app/src/test/java/com/a340/technicalassistant/TsmSymptomIndexParserTest.kt').read_text()
+          assert 'object TsmSymptomIndexParser' in parser
+          assert 'parseStandaloneFault' in parser
+          assert 'Ref. TASK 25-34-0' in tests
+          assert '23-33-00-810-915' in tests
+          assert '73-21-85-810-939' in tests
+          assert '26-10-00-810-806' in tests
           a=(r/'app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt').read_text()
           start=a.index('    private fun ocr(uri: Uri)')
           end=a.index('    private fun handlePfrOcr',start)
