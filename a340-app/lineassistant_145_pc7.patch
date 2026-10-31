@@ -1,0 +1,362 @@
+--- a/app/build.gradle.kts	2026-10-31 14:57:24.000000000 +0000
++++ b/app/build.gradle.kts	2026-10-31 15:32:13.758531266 +0000
+@@ -11,8 +11,8 @@
+         applicationId = "com.a340.technicalassistant"
+         minSdk = 24
+         targetSdk = 35
+-        versionCode = 51
+-        versionName = "1.4.5-PC6"
++        versionCode = 52
++        versionName = "1.4.5-PC7"
+         ndk {
+             abiFilters += listOf("arm64-v8a")
+         }
+--- a/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt	2026-10-31 14:57:24.000000000 +0000
++++ b/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt	2026-10-31 15:32:13.758316273 +0000
+@@ -114,7 +114,8 @@
+         val source: String?,
+         val faultClass: String?,
+         val identifiers: List<String>,
+-        val parsedFault: PostFlightAnalyzer.Fault?
++        val parsedFault: PostFlightAnalyzer.Fault?,
++        val authoritativeIndexOnly: Boolean = false
+     )
+ 
+     private data class TsmIndexRecord(
+@@ -204,7 +205,8 @@
+             source = fault.source,
+             faultClass = fault.faultClass,
+             identifiers = (fault.identifiers + extractIdentifiers(fault.text)).distinct(),
+-            parsedFault = fault
++            parsedFault = fault,
++            authoritativeIndexOnly = true
+         ),
+         aircraftProfile
+     )
+@@ -261,19 +263,24 @@
+         } else {
+             cockpitCandidates
+         }
+-        val authoritativeTaskRef = TsmFirstEntryPolicy.uniqueTaskRef(cockpitCompatible.map { it.indexTaskRef })
++        val exactIndexCandidates = when {
++            cockpitCompatible.isNotEmpty() -> cockpitCompatible
++            input.authoritativeIndexOnly -> findAuthoritativeFaultIndexCandidates(input)
++            else -> emptyList()
++        }
++        val authoritativeTaskRef = TsmFirstEntryPolicy.uniqueTaskRef(exactIndexCandidates.map { it.indexTaskRef })
+         val authoritativeIndex = authoritativeTaskRef?.let { taskRef ->
+-            cockpitCompatible.filter { it.indexTaskRef.equals(taskRef, true) }.maxByOrNull { indexScore(it, input) }
++            exactIndexCandidates.filter { it.indexTaskRef.equals(taskRef, true) }.maxByOrNull { indexScore(it, input) }
+         }
+-        val selectionRequired = cockpitCompatible.map { it.indexTaskRef.uppercase(Locale.US) }.distinct().size > 1
+-        val exactCockpitExists = cockpitCandidates.isNotEmpty()
++        val selectionRequired = exactIndexCandidates.map { it.indexTaskRef.uppercase(Locale.US) }.distinct().size > 1
++        val exactIndexExists = cockpitCandidates.isNotEmpty() || exactIndexCandidates.isNotEmpty()
+         val indexRecord = authoritativeIndex ?: when {
+             selectionRequired -> null
+-            exactCockpitExists -> null // fail closed instead of broad identifier/FTS fallback
+-            !TsmFirstEntryPolicy.allowBroadFallback(cockpitCandidates.size) -> null
++            input.authoritativeIndexOnly -> null // PFR: Fault Symptom List is authoritative; never guess a task.
++            exactIndexExists -> null
+             else -> findTsmIndexRecord(input)
+         }
+-        val directTask = if (indexRecord == null && !selectionRequired && !exactCockpitExists) findDirectTsmTask(input) else null
++        val directTask = if (indexRecord == null && !selectionRequired && !input.authoritativeIndexOnly && !exactIndexExists) findDirectTsmTask(input) else null
+         val cockpitMessage = input.cockpitMessage ?: indexRecord?.cockpitMessage
+         val cockpitAta = input.cockpitAta ?: indexRecord?.cockpitAta
+         val cockpitSource = when {
+@@ -318,7 +325,7 @@
+             supportHits(tsm, input).forEach(::add)
+         }
+ 
+-        val publicCandidates = if (selectionRequired) cockpitCandidates.map(::toPublicCandidate) else emptyList()
++        val publicCandidates = if (selectionRequired) exactIndexCandidates.map(::toPublicCandidate) else emptyList()
+         return LineAssistantResult(
+             summary = buildSummary(input, mel, tsm, aircraftProfile, publicCandidates, orderedHits),
+             safetySummary = buildSafety(mel, tsm, aircraftProfile),
+@@ -396,6 +403,59 @@
+             .sortedWith(compareBy<TsmIndexRecord> { it.maintenanceMessage }.thenBy { it.indexTaskRef })
+     }
+ 
++    private fun findAuthoritativeFaultIndexCandidates(input: FaultInput): List<TsmIndexRecord> {
++        if (input.maintenanceMessage.isBlank()) return emptyList()
++        val records = mutableListOf<TsmIndexRecord>()
++        val seen = linkedSetOf<String>()
++        val terms = buildList {
++            val ata = input.maintenanceAta?.trim().orEmpty()
++            if (ata.matches(Regex("\\d{2}-\\d{2}-\\d{2}"))) add(ata)
++            extractIdentifiers(input.maintenanceMessage).take(3).forEach(::add)
++            significantWords(input.maintenanceMessage).take(5).forEach(::add)
++        }.filter { it.isNotBlank() }.distinct()
++
++        // Search only index-bearing TSM chunks. FTS locates candidate pages; the
++        // final decision is exact record comparison below, never FTS ranking.
++        val expressions = mutableListOf<String>()
++        val ids = extractIdentifiers(input.maintenanceMessage).map(::normalizeToken).filter { it.length >= 3 }.distinct()
++        if (ids.isNotEmpty()) expressions += ids.take(3).joinToString(" AND ") { "\"$it\"" }
++        val words = significantWords(input.maintenanceMessage)
++        if (words.isNotEmpty()) expressions += words.take(5).joinToString(" AND ") { "\"$it\"*" }
++        if (terms.isNotEmpty()) expressions += terms.take(6).joinToString(" OR ") { "\"${normalizeToken(it)}\"*" }
++
++        for (expr in expressions.distinct().filter { it.isNotBlank() }) {
++            runCatching {
++                db.rawQuery(
++                    """
++                    SELECT c.document_filename,c.pdf_page,c.content
++                    FROM chunks_fts f JOIN chunks c ON c.chunk_id=f.chunk_id
++                    WHERE chunks_fts MATCH ? AND UPPER(COALESCE(c.manual,''))='TSM'
++                    ORDER BY c.pdf_page LIMIT 260
++                    """.trimIndent(), arrayOf(expr)
++                ).use { c ->
++                    while (c.moveToNext()) {
++                        parseTsmIndexRecords(c.getString(0), c.getInt(1), c.getString(2)).forEach { r ->
++                            if (!r.hasFaultMessage) return@forEach
++                            val key = "${r.indexTaskRef}|${r.maintenanceAta}|${r.maintenanceMessage}|${r.source}|${r.faultClass}"
++                            if (seen.add(key)) records += r
++                        }
++                    }
++                }
++            }
++        }
++
++        val exact = records.filter { r ->
++            exactIndexMatch(r, input) && pfrPhotoMatchIsStrong(r, input)
++        }
++        if (exact.isNotEmpty()) return exact.sortedByDescending { indexScore(it, input) }
++
++        // Allow only DB-aware OCR-near matching for the same ATA/source/class;
++        // still fail closed if this maps to more than one Ref TASK.
++        return records.filter { r ->
++            acceptableIndexMatch(r, input) && pfrPhotoMatchIsStrong(r, input)
++        }.sortedByDescending { indexScore(it, input) }
++    }
++
+     private fun sourceTokensEquivalent(observedRaw: String, trustedRaw: String): Boolean {
+         val a = normalizeToken(observedRaw)
+         val b = normalizeToken(trustedRaw)
+@@ -577,67 +637,23 @@
+         return if (competing == null) best.first else null
+     }
+ 
+-    private fun parseTsmIndexRecords(filename: String, page: Int, content: String): List<TsmIndexRecord> {
+-        val lines = content.lines().map(::cleanLine).filter { it.isNotBlank() }
+-        val starts = lines.indices.filter { lines[it].equals("WARNINGS/MALFUNCTION", true) }
+-        if (starts.isEmpty()) return emptyList()
+-        val out = mutableListOf<TsmIndexRecord>()
+-
+-        starts.forEachIndexed { idx, start ->
+-            val end = starts.getOrNull(idx + 1) ?: lines.size
+-            val block = lines.subList(start, end)
+-            val task = block.firstNotNullOfOrNull { line ->
+-                Regex("(?i)\\bTASK\\s+(\\d{2}-\\d{2}-\\d{2}-810-\\d{3}(?:-[A-Z]\\d*)?)\\b")
+-                    .find(line)?.groupValues?.getOrNull(1)?.uppercase(Locale.US)
+-            } ?: return@forEachIndexed
+-
+-            val faultMarker = block.indexOfFirst { it.equals("FAULT MESSAGES", true) }
+-            if (faultMarker >= 0) {
+-                val before = block.subList(0, faultMarker)
+-                val cockpitAtaIndex = before.indexOfLast { it.matches(Regex("\\d{2}-\\d{2}")) }
+-                val cockpitAta = before.getOrNull(cockpitAtaIndex).orEmpty()
+-                val cockpitValues = if (cockpitAtaIndex >= 0) before.drop(cockpitAtaIndex + 1) else emptyList()
+-                val cockpitType = cockpitValues.lastOrNull().orEmpty()
+-                val cockpitMessage = cockpitValues.dropLast(1).joinToString(" ").trim()
+-
+-                val after = block.drop(faultMarker + 1)
+-                val maintAtaIndex = after.indexOfFirst { it.matches(Regex("\\d{2}-\\d{2}-\\d{2}")) }
+-                if (maintAtaIndex < 0) return@forEachIndexed
+-                val classIndex = ((maintAtaIndex + 1) until after.size).firstOrNull { after[it] in setOf("1", "2", "3") }
+-                    ?: return@forEachIndexed
+-                if (classIndex - maintAtaIndex < 3) return@forEachIndexed
+-                val source = after[classIndex - 1]
+-                val message = after.subList(maintAtaIndex + 1, classIndex - 1).joinToString(" ").trim()
+-                val identifiers = mutableListOf<String>()
+-                val idMarker = after.indexOfFirst { it.equals("IDENTIFIERS", true) || it.equals("IDENTIFIER", true) }
+-                if (idMarker >= 0) {
+-                    after.drop(idMarker + 1).take(8).forEach { line ->
+-                        if (line.matches(Regex("[A-Z0-9][A-Z0-9/.,-]*"))) {
+-                            identifiers += line.split(Regex("[/, ]+")).filter { it.isNotBlank() }
+-                        }
+-                    }
+-                }
+-                out += TsmIndexRecord(filename, page, task, cockpitAta, cockpitMessage, cockpitType,
+-                    after[maintAtaIndex], message, source, after[classIndex], identifiers.distinct(), true)
+-            } else {
+-                val header = block.indexOfFirst { it.equals("TYPE", true) }
+-                if (header < 0) return@forEachIndexed
+-                val payload = block.drop(header + 1).filterNot { it.startsWith("** ON A/C") || it.startsWith("EMB SB") }
+-                if (payload.isEmpty()) return@forEachIndexed
+-                val ataIndex = payload.indexOfFirst { it.matches(Regex("\\d{2}-\\d{2}")) }
+-                val cockpitAta = if (ataIndex >= 0) payload[ataIndex] else ""
+-                val startMessage = if (ataIndex >= 0) ataIndex + 1 else 0
+-                val knownTypes = listOf("OBSERVATIONS", "EWD WARNING(S)", "PFD FLAG(S)", "ND FLAG(S)", "STS-INOP SYSTEM", "MAINTENANCE STATUS", "MAINT STATUS")
+-                var joined = payload.drop(startMessage).joinToString(" ").trim()
+-                val type = knownTypes.firstOrNull { joined.endsWith(it, true) }.orEmpty()
+-                if (type.isNotBlank()) joined = joined.dropLast(type.length).trim()
+-                if (joined.isBlank()) return@forEachIndexed
+-                out += TsmIndexRecord(filename, page, task, cockpitAta, joined, type,
+-                    "", "", "", "", emptyList(), false)
+-            }
++    private fun parseTsmIndexRecords(filename: String, page: Int, content: String): List<TsmIndexRecord> =
++        TsmSymptomIndexParser.parse(content).map { r ->
++            TsmIndexRecord(
++                indexFilename = filename,
++                indexPage = page,
++                indexTaskRef = r.taskRef,
++                cockpitAta = r.cockpitAta,
++                cockpitMessage = r.cockpitMessage,
++                cockpitType = r.cockpitType,
++                maintenanceAta = r.maintenanceAta,
++                maintenanceMessage = r.maintenanceMessage,
++                source = r.source,
++                faultClass = r.faultClass,
++                identifiers = r.identifiers,
++                hasFaultMessage = r.hasFaultMessage
++            )
+         }
+-        return out
+-    }
+ 
+     private fun pfrPhotoMatchIsStrong(record: TsmIndexRecord, input: FaultInput): Boolean {
+         if (input.parsedFault == null) return true
+@@ -1784,7 +1800,7 @@
+     }
+ 
+     private fun buildSummary(input: FaultInput, mel: LineMelResolution, tsm: LineTsmResolution?, profile: String, candidates: List<LineTsmCandidate>, hits: List<SearchHit>): String = buildString {
+-        append("LINE ASSISTANT 1.4.5-PC6 • AUTHORITATIVE ECAM + CMS TASK LOCK\n\n")
++        append("LINE ASSISTANT 1.4.5-PC7 • TSM FAULT SYMPTOM INDEX + BATCH EVENTS\n\n")
+         input.parsedFault?.let { append("PFR STRUCTURED RECORD\n").append(it.displaySummary()).append("\n\n") }
+ 
+         append("1 • MEL / DISPATCH\n")
+--- a/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt	2026-10-31 14:57:24.000000000 +0000
++++ b/app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt	2026-10-31 15:32:49.383256605 +0000
+@@ -55,6 +55,9 @@
+         val identifiers: EditText
+     )
+ 
++    private data class PfrEditorBinding(val eventNumber: Int, val fields: PfrEditorFields)
++    private val pfrEditors = mutableListOf<PfrEditorBinding>()
++
+     private lateinit var txtStatus: TextView
+     private lateinit var settingsPanel: View
+     private lateinit var txtModel: TextView
+@@ -313,6 +316,83 @@
+         }
+     }
+ 
++    private fun resolveReviewedPfrEvents() {
++        if (pfrEditors.isEmpty()) return toast("No PFR events to resolve")
++        val faults = mutableListOf<PostFlightAnalyzer.Fault>()
++        for (binding in pfrEditors.sortedBy { it.eventNumber }) {
++            val fault = buildFaultFromEditor(binding.fields, binding.eventNumber) ?: return
++            faults += fault
++        }
++        resolvePfrFaults(faults, "PFR BATCH • USER VERIFIED")
++    }
++
++    private fun resolvePfrFaults(faults: List<PostFlightAnalyzer.Fault>, label: String) {
++        val e = engine ?: return toast("Import database first")
++        if (faults.isEmpty()) return
++        val profile = editAircraft.text.toString().trim()
++        currentQuestion = faults.joinToString("\n\n") { it.displaySummary() }
++        clearResults(keepOcr = true)
++        txtResultHeading.visibility = View.VISIBLE
++        txtResult.visibility = View.VISIBLE
++        txtResult.text = "Resolving ${faults.size} PFR events through the authoritative TSM Fault Symptom List…"
++        status("$label • RESOLVING ${faults.size} EVENTS…")
++        io.execute {
++            runCatching { faults.map { fault -> e.resolvePfr(fault, profile) } }
++                .onSuccess { results -> ui { showBatchResults(results, label) } }
++                .onFailure { ex -> ui {
++                    txtResult.text = "BATCH RESOLUTION ERROR\n${ex.message}"
++                    status("BATCH RESOLUTION FAILED • CHECK LOG")
++                    appLog.e("PFR_BATCH_RESOLVE_FAIL", ex)
++                } }
++        }
++    }
++
++    private fun showBatchResults(results: List<LineAssistantResult>, label: String) {
++        currentResult = null
++        currentHits = results.flatMap { it.hits }
++        txtResultHeading.visibility = View.VISIBLE
++        txtResult.visibility = View.VISIBLE
++        txtResult.text = buildString {
++            append("PFR BATCH RESULT • ").append(results.size).append(" EVENT(S)\n")
++            append("Each event is resolved independently through the authoritative TSM Fault Symptom List.\n")
++            results.forEachIndexed { index, result ->
++                val fault = result.structuredFault
++                append("\n==============================\n")
++                append("EVENT ").append(fault?.number ?: index + 1)
++                if (!fault?.text.isNullOrBlank()) append(" • ").append(fault?.text)
++                append("\n==============================\n")
++                append(result.summary.trim()).append('\n')
++            }
++        }
++        renderBatchSourcePacket(results)
++        aiCard.visibility = View.GONE
++        val resolved = results.count { it.tsm != null }
++        val unresolved = results.size - resolved
++        status("$label • TSM RESOLVED $resolved/${results.size} • UNRESOLVED $unresolved")
++        appLog.i("PFR_BATCH_RESOLVE_OK", "events=${results.size} resolved=$resolved unresolved=$unresolved")
++    }
++
++    private fun renderBatchSourcePacket(results: List<LineAssistantResult>) {
++        sourceContainer.removeAllViews()
++        val anyHits = results.any { it.hits.isNotEmpty() }
++        if (!anyHits) return
++        txtSourcesHeading.visibility = View.VISIBLE
++        sourceContainer.visibility = View.VISIBLE
++        results.forEachIndexed { index, result ->
++            val fault = result.structuredFault
++            sourceContainer.addView(sectionHeader("EVENT ${fault?.number ?: index + 1} • ${fault?.text.orEmpty()}"))
++            var lastStage = ""
++            result.hits.forEach { hit ->
++                val stage = stageLabel(hit)
++                if (stage != lastStage) {
++                    sourceContainer.addView(sectionHeader(stage))
++                    lastStage = stage
++                }
++                sourceContainer.addView(sourceCard(hit))
++            }
++        }
++    }
++
+     private fun showResult(result: LineAssistantResult, label: String) {
+         currentResult = result
+         currentHits = result.hits
+@@ -692,6 +772,7 @@
+         val text = result.text.trim()
+         if (text.isBlank()) return toast("No readable text detected")
+         clearResults()
++        pfrEditors.clear()
+         ocrContainer.removeAllViews()
+         ocrContainer.visibility = View.VISIBLE
+ 
+@@ -709,8 +790,10 @@
+                 renderPfrEditor(fault, text, index + 1)
+             }
+             addOcrButton("+ ADD MANUAL PFR EVENT") {
+-                renderPfrEditor(null, text, ocrContainer.childCount + 1)
++                val next = (pfrEditors.maxOfOrNull { it.eventNumber } ?: 0) + 1
++                renderPfrEditor(null, text, next)
+             }
++            addOcrButton("RESOLVE ALL REVIEWED EVENTS") { resolveReviewedPfrEvents() }
+             status("PFR OCR • ${parsed.faults.size} EVENT(S) • REVIEW FIELDS BEFORE RESOLVE")
+         }
+     }
+@@ -729,6 +812,7 @@
+     private fun showManualPfrEntry(mode: ManualEntryMode) {
+         photoMode = PhotoMode.PFR
+         clearResults()
++        pfrEditors.clear()
+         ocrContainer.removeAllViews()
+         ocrContainer.visibility = View.VISIBLE
+         val title = when (mode) {
+@@ -834,6 +918,8 @@
+             ecamMessage, cockpitAta, cockpitType, cockpitStatus,
+             cmsCh, cmsSe, cmsSu, source, cmsMessage, faultClass, persistence, identifiers
+         )
++        pfrEditors.removeAll { it.eventNumber == eventNumber }
++        pfrEditors += PfrEditorBinding(eventNumber, fields)
+ 
+         root.addView(MaterialButton(this).apply {
+             text = "SEARCH / TROUBLESHOOT"
