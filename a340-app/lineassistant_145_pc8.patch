@@ -1,0 +1,265 @@
+--- a/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt
++++ b/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt
+@@ -316,12 +316,29 @@
+         }
+ 
+         melEntryHit(cockpitMessage, mel)?.let(::add)
+-        mel.itemRefs.forEach { melItemHit(it)?.let(::add) }
++        val melItemHits = mel.itemRefs.mapNotNull { ref -> melItemHit(ref)?.let { ref to it } }
++        val matchedMelRefs = TsmContextNarrower.matchedMelRefs(
++            mel.itemRefs, melItemHits.associate { it.first to it.second.title }, input.maintenanceMessage
++        ).toSet()
++        melItemHits.sortedBy { if (it.first in matchedMelRefs) 0 else 1 }.forEach { (ref, hit) ->
++            val tagged = when {
++                ref in matchedMelRefs -> hit.copy(
++                    title = "CMS-MATCHED MEL ITEM • ${hit.title}",
++                    snippet = "CMS CONTEXT MATCHED THIS REFERENCED MEL ITEM; DISPATCH STATUS IS STILL UNCHANGED UNTIL MEL CONDITIONS/EFFECTIVITY ARE VERIFIED.\n\n${hit.snippet}"
++                )
++                matchedMelRefs.isNotEmpty() -> hit.copy(
++                    title = "ECAM-REFERENCED MEL ALTERNATIVE • ${hit.title}",
++                    snippet = "GENERIC ECAM REFERENCE; NOT SELECTED BY THE CURRENT CMS OUTBOARD/INBOARD CONTEXT. VERIFY ORIGINAL MEL.\n\n${hit.snippet}"
++                )
++                else -> hit
++            }
++            add(tagged)
++        }
+         mel.conditions.flatMap { condition -> melProcedureHits(condition.conditionRef) }.forEach(::add)
+ 
+         if (tsm != null) {
+             taskHit(tsm.taskRef, "TSM")?.let(::add)
+-            possibleCauseSupportHits(tsm).forEach(::add)
++            possibleCauseSupportHits(tsm, input).forEach(::add)
+             supportHits(tsm, input).forEach(::add)
+         }
+ 
+@@ -1411,15 +1428,15 @@
+             }
+     }
+ 
+-    private fun possibleCauseSupportHits(tsm: LineTsmResolution): List<SearchHit> {
++    private fun possibleCauseSupportHits(tsm: LineTsmResolution, input: FaultInput): List<SearchHit> {
+         val out = mutableListOf<SearchHit>()
+         extractPossibleCauses(tsm).forEach { cause ->
+-            causeMappedHits(cause, tsm).forEach { out += it }
++            causeMappedHits(cause, tsm, input).forEach { out += it }
+         }
+         return out.take(128)
+     }
+ 
+-    private fun causeMappedHits(cause: PossibleCause, tsm: LineTsmResolution): List<SearchHit> {
++    private fun causeMappedHits(cause: PossibleCause, tsm: LineTsmResolution, input: FaultInput): List<SearchHit> {
+         val out = mutableListOf<SearchHit>()
+         val seen = linkedSetOf<String>()
+         fun add(hit: SearchHit?) {
+@@ -1431,7 +1448,7 @@
+         if (!cause.wiringLike) {
+             ipcHitsForPossibleCause(cause, tsm).forEach(::add)
+         }
+-        possibleCauseReferenceHits(cause, tsm).forEach(::add)
++        possibleCauseReferenceHits(cause, tsm, input).forEach(::add)
+ 
+         // A FIN printed by the verified TSM can also be a precise AWM identifier.
+         // Keep it cause-scoped so the engineer can trace the equipment without losing
+@@ -1439,7 +1456,13 @@
+         if (!cause.wiringLike) {
+             cause.identifiers.distinct().take(6).forEach { id ->
+                 awmIdentifierHit(id)?.let { hit ->
+-                    add(hit.copy(title = "POSSIBLE CAUSE ${cause.index} • ${cause.text} → ${hit.title}"))
++                    val context = possibleCauseContext(cause, tsm, input)
++                    val contextTag = when (context.kind) {
++                        TsmContextNarrower.MatchKind.DIRECT -> " • CMS DIRECT MATCH"
++                        TsmContextNarrower.MatchKind.CONTEXT -> " • CMS CONTEXT MATCH"
++                        TsmContextNarrower.MatchKind.NONE -> ""
++                    }
++                    add(hit.copy(title = "POSSIBLE CAUSE ${cause.index}$contextTag • ${cause.text} → ${hit.title}"))
+                 }
+             }
+         }
+@@ -1454,9 +1477,32 @@
+             wiringLike = cause.wiringLike
+         )
+ 
+-    private fun possibleCauseReferenceHits(cause: PossibleCause, tsm: LineTsmResolution): List<SearchHit> {
++    private fun selectedCmsIdentifiers(input: FaultInput): List<String> =
++        TsmContextNarrower.selectedIdentifiers(input.identifiers, input.maintenanceMessage)
++
++    private fun possibleCauseContext(
++        cause: PossibleCause,
++        tsm: LineTsmResolution,
++        input: FaultInput
++    ): TsmContextNarrower.CauseContext {
++        val route = possibleCauseRoute(cause, tsm)
++        if (!route.matched) return TsmContextNarrower.CauseContext(
++            TsmContextNarrower.MatchKind.NONE, emptyList(), emptyList()
++        )
++        return TsmContextNarrower.causeContext(
++            cause.text, cause.identifiers, route.actionText, route.references, selectedCmsIdentifiers(input)
++        )
++    }
++
++    private fun possibleCauseReferenceHits(cause: PossibleCause, tsm: LineTsmResolution, input: FaultInput): List<SearchHit> {
+         val route = possibleCauseRoute(cause, tsm)
+         if (!route.matched) return emptyList()
++        val context = possibleCauseContext(cause, tsm, input)
++        val selectedRefs = if (context.kind != TsmContextNarrower.MatchKind.NONE && context.selectedReferences.isNotEmpty()) {
++            context.selectedReferences
++        } else {
++            route.references
++        }
+ 
+         val out = mutableListOf<SearchHit>()
+         val seen = linkedSetOf<String>()
+@@ -1479,16 +1525,25 @@
+             } else {
+                 "TSM FAULT-ISOLATION BRANCH REFERENCE — VERIFY THE PRINTED CONDITION/STEP BEFORE USE"
+             }
+-            val context = if (causeSpecific) route.actionText else route.branchText
++            val evidenceContext = if (causeSpecific) {
++                if (context.kind != TsmContextNarrower.MatchKind.NONE)
++                    TsmContextNarrower.narrowEvidence(route.actionText, context.selectedIdentifiers)
++                else route.actionText
++            } else route.branchText
++            val contextTag = when (context.kind) {
++                TsmContextNarrower.MatchKind.DIRECT -> " • CMS DIRECT MATCH"
++                TsmContextNarrower.MatchKind.CONTEXT -> " • CMS CONTEXT MATCH"
++                TsmContextNarrower.MatchKind.NONE -> ""
++            }
+             out += hit.copy(
+-                title = "POSSIBLE CAUSE ${cause.index} • ${cause.text} → ${hit.title}",
+-                snippet = scope + "\n" + context.take(1800) + "\n\n" + hit.snippet
++                title = "POSSIBLE CAUSE ${cause.index}$contextTag • ${cause.text} → ${hit.title}",
++                snippet = scope + "\n" + evidenceContext.take(1800) + "\n\n" + hit.snippet
+             )
+         }
+ 
+         // Exact cause-specific references always win if the same source also
+         // appears elsewhere in the matched Fault Isolation branch.
+-        route.references.forEach { add(it, true) }
++        selectedRefs.forEach { add(it, true) }
+         if (extractPossibleCauses(tsm).size == 1) {
+             route.branchReferences.forEach { add(it, false) }
+         }
+@@ -1510,22 +1565,30 @@
+             score: Double
+         ) {
+             if (fin.isBlank() && pn.isBlank() && catalogRef.isBlank()) return
+-            val key = rowId.ifBlank { "${normalizeToken(fin)}|${normalizeToken(pn)}|$catalogRef" }
++            val repaired = TsmContextNarrower.repairIpc(fin, pn, nomenclature, rawBlock, cause.identifiers)
++            val displayFin = repaired.fin
++            val displayPn = repaired.partNumber
++            val displayNomenclature = repaired.nomenclature
++            val key = rowId.ifBlank { "${normalizeToken(displayFin)}|${normalizeToken(displayPn)}|$catalogRef" }
+             if (!seen.add(key)) return
+-            val ref = fin.ifBlank { pn.ifBlank { catalogRef } }
++            val ref = displayFin.ifBlank { displayPn.ifBlank { catalogRef } }
+             val entityId = "IPC-${rowId.ifBlank { key }}"
+-            val label = nomenclature.ifBlank { pn.ifBlank { fin.ifBlank { "IPC ITEM" } } }
++            val label = displayNomenclature.ifBlank { displayPn.ifBlank { displayFin.ifBlank { "IPC ITEM" } } }
+             val detail = buildString {
+                 append(matchType).append(" FROM VERIFIED TSM POSSIBLE CAUSE\n")
+-                append("FIN: ").append(fin.ifBlank { "NOT INDEXED" }).append('\n')
+-                append("PART NUMBER: ").append(pn.ifBlank { "NOT INDEXED" }).append('\n')
++                if (repaired.identifierRecoveredFromRaw) append("FIN RECOVERED FROM VERIFIED IPC RAW BLOCK + TSM CAUSE CONTEXT\n")
++                append("FIN: ").append(displayFin.ifBlank { "NOT INDEXED" }).append('\n')
++                append("PART NUMBER: ").append(displayPn.ifBlank { "NOT INDEXED" }).append('\n')
+                 append("IPC CATALOG: ").append(catalogRef.ifBlank { "NOT INDEXED" }).append('\n')
+                 if (effectivity.isNotBlank()) append("EFFECTIVITY: ").append(effectivity.take(800)).append('\n')
+-                append(rawBlock.take(1500))
+-            }
++                append(repaired.rawBlock.take(1500))
++            }
++            val cmsIds = TsmContextNarrower.selectedIdentifiers(emptyList(), tsm.maintenanceMessage)
++            val direct = cause.identifiers.map(::normalizeToken).any { it in cmsIds }
++            val contextTag = if (direct) " • CMS DIRECT MATCH" else ""
+             out += SearchHit(
+                 "part_number", entityId, "IPC", ref,
+-                "POSSIBLE CAUSE ${cause.index} • ${cause.text} → $label",
++                "POSSIBLE CAUSE ${cause.index}$contextTag • ${cause.text} → $label",
+                 detail,
+                 score
+             )
+@@ -1800,7 +1863,7 @@
+     }
+ 
+     private fun buildSummary(input: FaultInput, mel: LineMelResolution, tsm: LineTsmResolution?, profile: String, candidates: List<LineTsmCandidate>, hits: List<SearchHit>): String = buildString {
+-        append("LINE ASSISTANT 1.4.5-PC7 • TSM FAULT SYMPTOM INDEX + BATCH EVENTS\n\n")
++        append("LINE ASSISTANT 1.4.5-PC8 • TSM-PRESERVING CMS CONTEXT NARROWING\n\n")
+         input.parsedFault?.let { append("PFR STRUCTURED RECORD\n").append(it.displaySummary()).append("\n\n") }
+ 
+         append("1 • MEL / DISPATCH\n")
+@@ -1815,7 +1878,15 @@
+         mel.page?.let { append("Original MEL PDF page: ").append(it).append('\n') }
+         if (mel.applicability.isNotBlank()) append("Applicability: ").append(mel.applicability).append('\n')
+         if (mel.variantCount > 1) append("Effectivity variants: ").append(mel.variantCount).append('\n')
+-        if (mel.itemRefs.isNotEmpty()) append("Referenced MEL item(s): ").append(mel.itemRefs.joinToString(", ")).append('\n')
++        if (mel.itemRefs.isNotEmpty()) {
++            append("Referenced MEL item(s): ").append(mel.itemRefs.joinToString(", ")).append('\n')
++            val melTitles = mel.itemRefs.associateWith { melItemHit(it)?.title.orEmpty() }
++            val cmsMatchedMel = TsmContextNarrower.matchedMelRefs(mel.itemRefs, melTitles, input.maintenanceMessage)
++            if (cmsMatchedMel.isNotEmpty()) {
++                append("CMS-matched MEL item(s): ").append(cmsMatchedMel.joinToString(", "))
++                    .append(" — dispatch status unchanged; verify original MEL conditions/effectivity.\n")
++            }
++        }
+         mel.conditions.forEach { c ->
+             append("  ").append(c.conditionRef)
+             if (c.title.isNotBlank()) append(" — ").append(c.title)
+@@ -1863,6 +1934,28 @@
+ 
+         if (tsm != null) {
+             val causes = extractPossibleCauses(tsm)
++            val cmsIds = selectedCmsIdentifiers(input)
++            if (cmsIds.isNotEmpty()) {
++                val matched = causes.map { it to possibleCauseContext(it, tsm, input) }
++                    .filter { it.second.kind != TsmContextNarrower.MatchKind.NONE }
++                append("\nCMS CONTEXT NARROWING — VERIFIED TSM TASK UNCHANGED\n")
++                append("CMS identifier(s): ").append(cmsIds.joinToString(", ")).append('\n')
++                if (matched.isEmpty()) {
++                    append("No Possible Cause was promoted from CMS identifiers; the complete TSM map remains below.\n")
++                } else {
++                    matched.forEach { (cause, context) ->
++                        val label = if (context.kind == TsmContextNarrower.MatchKind.DIRECT) "DIRECT" else "CONTEXT"
++                        append("MATCHED ").append(label).append(" • Cause ").append(cause.index).append(": ").append(cause.text)
++                        if (context.selectedIdentifiers.isNotEmpty()) append(" • via ").append(context.selectedIdentifiers.joinToString(", "))
++                        append('\n')
++                        if (context.selectedReferences.isNotEmpty()) {
++                            append("   SELECTED REF(S): ")
++                                .append(context.selectedReferences.joinToString(", ") { "${it.manual} ${it.reference}" }).append('\n')
++                        }
++                    }
++                }
++                append("Complete Possible Causes and original TSM text are preserved below; narrowing does not modify the TSM.\n")
++            }
+             append("\nTSM POSSIBLE CAUSES — COMPLETE SOURCE MAP")
+             if (causes.isEmpty()) {
+                 append("\nNo suspect item is listed under the TSM Possible Causes section for this task.\n")
+@@ -1873,6 +1966,16 @@
+                     if (cause.identifiers.isNotEmpty()) append(" • ID: ").append(cause.identifiers.joinToString(", "))
+                     append('\n')
+                     val route = possibleCauseRoute(cause, tsm)
++                    val cmsContext = possibleCauseContext(cause, tsm, input)
++                    if (cmsContext.kind != TsmContextNarrower.MatchKind.NONE) {
++                        append("   CMS MATCH: ").append(cmsContext.kind.name)
++                        if (cmsContext.selectedIdentifiers.isNotEmpty()) append(" via ").append(cmsContext.selectedIdentifiers.joinToString(", "))
++                        append('\n')
++                        if (cmsContext.selectedReferences.isNotEmpty()) {
++                            append("   CMS-SELECTED REF(S): ")
++                                .append(cmsContext.selectedReferences.joinToString(", ") { "${it.manual} ${it.reference}" }).append('\n')
++                        }
++                    }
+                     if (route.matched) {
+                         append("   TSM ACTION: ").append(route.actionText.replace(Regex("\\s+"), " ").take(700)).append('\n')
+                         if (route.references.isNotEmpty()) {
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -11,8 +11,8 @@
+         applicationId = "com.a340.technicalassistant"
+         minSdk = 24
+         targetSdk = 35
+-        versionCode = 52
+-        versionName = "1.4.5-PC7"
++        versionCode = 53
++        versionName = "1.4.5-PC8"
+         ndk {
+             abiFilters += listOf("arm64-v8a")
+         }
