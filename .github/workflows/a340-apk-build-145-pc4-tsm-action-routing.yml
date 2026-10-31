@@ -14,7 +14,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Apply exact 1.4.5 baseline + PC1 + PC2 + PC3 + PC4
+      - name: Apply exact 1.4.5 baseline + PC1 + PC2 + PC3 + deterministic PC4
         working-directory: a340-app
         shell: bash
         run: |
@@ -47,7 +47,10 @@ jobs:
           git apply --directory=a340-app a340-app/lineassistant_145_pc2_photo_fix.patch
           cd a340-app
           python lineassistant_v145_pc3_cause_routing.py
-          python lineassistant_v145_pc4_tsm_action_routing.py
+          python lineassistant_pc4_write_gradle.py
+          python lineassistant_pc4_write_engine.py
+          python lineassistant_pc4_write_search.py
+          python lineassistant_pc4_write_pdfindex.py
 
       - name: Verify PC4 invariants and frozen OCR/PFR path
         shell: bash
