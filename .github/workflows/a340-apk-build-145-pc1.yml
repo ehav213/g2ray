@@ -40,8 +40,9 @@ jobs:
           python lineassistant_v143_crop_confirm_toolbar_patch.py
           python lineassistant_v144_cockpit_only_pfr_patch.py
           python lineassistant_v145_cms_candidate_selector_patch.py
-          git apply --check lineassistant_145_pc1.patch
-          git apply lineassistant_145_pc1.patch
+          cd ..
+          git apply --check --directory=a340-app a340-app/lineassistant_145_pc1.patch
+          git apply --directory=a340-app a340-app/lineassistant_145_pc1.patch
 
       - name: Verify 1.4.5 OCR golden baseline unchanged and PC1 present
         shell: bash
@@ -97,6 +98,7 @@ jobs:
           FILE='a340-app/app/src/main/java/com/a340/technicalassistant/SearchRepository.kt'
           grep -q 'import android.database.sqlite.SQLiteDatabase' "$FILE"
           sed -i 's/import android.database.sqlite.SQLiteDatabase/import com.a340.technicalassistant.db.FtsSQLiteDatabase as SQLiteDatabase/' "$FILE"
+          grep -q 'import com.a340.technicalassistant.db.FtsSQLiteDatabase as SQLiteDatabase' "$FILE"
 
       - name: Build debug APK
         working-directory: a340-app
