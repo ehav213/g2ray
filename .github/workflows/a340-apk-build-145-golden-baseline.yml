@@ -1,0 +1,114 @@
+name: Build Line Assistant 1.4.5 Golden Baseline
+
+on:
+  push:
+    branches: [ lineassistant-145-golden-baseline ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout golden baseline branch
+        uses: actions/checkout@v4
+      - name: Apply Line Assistant patch chain through EXACT 1.4.5 only
+        working-directory: a340-app
+        shell: bash
+        run: |
+          python lineassistant_v111_runtime_patch.py
+          python lineassistant_v120_pfr_patch.py
+          python lineassistant_v130_pfr_strict_patch.py
+          python lineassistant_v131_compile_fix.py
+          python lineassistant_v132_version_patch.py
+          python lineassistant_v133_output_cleanup_patch.py
+          python lineassistant_v134_task_range_patch.py
+          python lineassistant_v135_pfr_element_split_patch.py
+          python lineassistant_v135_compile_fix.py
+          python lineassistant_v136_universal_pfr_patch.py
+          python lineassistant_v137_pfr_structured_editor_patch.py
+          python lineassistant_v138_patchfix.py
+          python lineassistant_v138_entrypoint_classification_patch.py
+          python lineassistant_v139_exact_ecam_classification_patch.py
+          python lineassistant_v140_cms_index_match_patch.py
+          python lineassistant_v141_sections_manual_crop_patch.py
+          python lineassistant_v141_compile_fix.py
+          python lineassistant_v142_unified_ios_patch.py
+          python lineassistant_v142_xml_fix.py
+          python lineassistant_v143_crop_confirm_toolbar_patch.py
+          python lineassistant_v144_cockpit_only_pfr_patch.py
+          python lineassistant_v145_cms_candidate_selector_patch.py
+      - name: Verify no post-1.4.5 patches are present
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          root = Path('a340-app')
+          gradle = (root/'app/build.gradle.kts').read_text()
+          activity = (root/'app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt').read_text()
+          checks = {
+              'versionName 1.4.5': 'versionName = "1.4.5"' in gradle,
+              'no 1.4.6 multipass preprocessor': 'PfrImagePreprocessor' not in activity,
+              'no 1.5.x DB corrector': 'PfrDatabaseOcrCorrector' not in activity,
+              'crop path present': 'CropConfirmActivity' in activity,
+              'direct OCR path present': 'TextRecognition.getClient' in activity,
+          }
+          for name, ok in checks.items(): print(('PASS ' if ok else 'FAIL ') + name)
+          failed = [k for k,v in checks.items() if not v]
+          if failed: raise SystemExit('Golden-baseline verification failed: ' + ', '.join(failed))
+          PY
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Install Android 35 SDK
+        shell: bash
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Route Technical Master through bundled FTS5 SQLite
+        shell: bash
+        run: |
+          FILE='a340-app/app/src/main/java/com/a340/technicalassistant/SearchRepository.kt'
+          grep -q 'import android.database.sqlite.SQLiteDatabase' "$FILE"
+          sed -i 's/import android.database.sqlite.SQLiteDatabase/import com.a340.technicalassistant.db.FtsSQLiteDatabase as SQLiteDatabase/' "$FILE"
+          grep -q 'import com.a340.technicalassistant.db.FtsSQLiteDatabase as SQLiteDatabase' "$FILE"
+      - name: Build debug APK
+        working-directory: a340-app
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:assembleDebug --stacktrace
+      - name: Verify bundled SQLite native library
+        shell: bash
+        run: unzip -l a340-app/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
+      - name: Prepare golden source and checksum
+        shell: bash
+        run: |
+          cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.4.5-GOLDEN.apk
+          sha256sum LineAssistant-1.4.5-GOLDEN.apk | tee LineAssistant-1.4.5-GOLDEN.sha256
+          rm -rf a340-app/.gradle a340-app/app/build a340-app/build a340-app/.idea
+          rm -f a340-app/local.properties
+      - name: Upload golden source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.5-GOLDEN-Source
+          path: a340-app/
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Upload golden APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.5-GOLDEN
+          path: |
+            LineAssistant-1.4.5-GOLDEN.apk
+            LineAssistant-1.4.5-GOLDEN.sha256
+          if-no-files-found: error
