@@ -1,0 +1,271 @@
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index eac2897..70a37bf 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -11,8 +11,8 @@ android {
+         applicationId = "com.a340.technicalassistant"
+         minSdk = 24
+         targetSdk = 35
+-        versionCode = 45
+-        versionName = "1.4.5"
++        versionCode = 46
++        versionName = "1.4.5-PC1"
+         ndk {
+             abiFilters += listOf("arm64-v8a")
+         }
+diff --git a/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt b/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt
+index 2757733..74ea645 100644
+--- a/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt
++++ b/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt
+@@ -142,6 +142,14 @@ class LineAssistantEngine(
+         val applicability: String
+     )
+ 
++    private data class PossibleCause(
++        val index: Int,
++        val text: String,
++        val identifiers: List<String>,
++        val wiringLike: Boolean
++    )
++
++
+     private data class MelEntryRow(
+         val id: String,
+         val ata: String,
+@@ -274,6 +282,7 @@ class LineAssistantEngine(
+ 
+         if (tsm != null) {
+             taskHit(tsm.taskRef, "TSM")?.let(::add)
++            possibleCauseSupportHits(tsm).forEach(::add)
+             supportHits(tsm, input).forEach(::add)
+         }
+ 
+@@ -1272,6 +1281,194 @@ class LineAssistantEngine(
+         return false
+     }
+ 
++    private fun extractPossibleCauses(tsm: LineTsmResolution): List<PossibleCause> {
++        val text = tsm.taskContent.replace("\r", "")
++        val start = Regex("(?im)^\\s*(?:1\\.\\s*)?Possible Causes\\s*$", RegexOption.IGNORE_CASE).find(text) ?: return emptyList()
++        val tail = text.substring(start.range.last + 1)
++        val end = Regex("(?im)^\\s*(?:2\\.?\\s*)?(?:\\n\\s*)?Job Set-up Information\\s*$", RegexOption.IGNORE_CASE).find(tail)
++        val section = (if (end == null) tail else tail.substring(0, end.range.first)).trim()
++        if (section.isBlank()) return emptyList()
++
++        fun ignorable(line: String): Boolean {
++            val u = normalizeText(line)
++            return u.isBlank() ||
++                u.matches(Regex("^\\d+[.]?$")) ||
++                u.matches(Regex("^PAGE\\s+\\d+\\s+OF\\s+\\d+$")) ||
++                u.matches(Regex("^\\d{2}-\\d{2}\\s+-\\s+.+$")) ||
++                u.startsWith("** ON A/C") || u.startsWith("ON A/C ")
++        }
++
++        val raw = mutableListOf<String>()
++        var current: StringBuilder? = null
++        var waitingForBulletText = false
++        var sawBullet = false
++        fun flush() {
++            val value = current?.toString()?.replace(Regex("\\s+"), " ")?.trim().orEmpty()
++            if (value.isNotBlank() && !ignorable(value)) raw += value
++            current = null
++        }
++
++        section.lines().forEach { sourceLine ->
++            var line = sourceLine.trim()
++            if (ignorable(line)) return@forEach
++            val bullet = Regex("^[·•\\-–—*]+\\s*(.*)$").find(line)
++            if (bullet != null) {
++                sawBullet = true
++                flush()
++                line = bullet.groupValues[1].trim()
++                if (line.isBlank()) {
++                    waitingForBulletText = true
++                } else {
++                    current = StringBuilder(line)
++                    waitingForBulletText = false
++                }
++                return@forEach
++            }
++            if (waitingForBulletText) {
++                current = StringBuilder(line)
++                waitingForBulletText = false
++                return@forEach
++            }
++            if (current != null) {
++                current!!.append(' ').append(line)
++            } else if (!sawBullet) {
++                if (line.length <= 180) raw += line
++            }
++        }
++        flush()
++
++        return raw.map { it.trim(' ', '.', ';') }
++            .filter { it.isNotBlank() }
++            .distinctBy(::normalizeText)
++            .take(32)
++            .mapIndexed { i, causeText ->
++                val upper = normalizeText(causeText)
++                PossibleCause(
++                    index = i + 1,
++                    text = causeText,
++                    identifiers = extractIdentifiers(causeText),
++                    wiringLike = listOf("WIRING", "WIRE", "HARNESS", "CABLE", "CONNECTOR", "CONTACT", "SPLICE", "GROUND")
++                        .any { upper.contains(it) }
++                )
++            }
++    }
++
++    private fun possibleCauseSupportHits(tsm: LineTsmResolution): List<SearchHit> {
++        val out = mutableListOf<SearchHit>()
++        val seen = linkedSetOf<String>()
++        fun add(hit: SearchHit?) {
++            hit ?: return
++            val key = "${hit.entityType}|${hit.entityId}|${hit.manual}|${hit.reference}"
++            if (seen.add(key)) out += hit
++        }
++
++        val causes = extractPossibleCauses(tsm)
++        causes.forEach { cause ->
++            if (!cause.wiringLike) ipcHitsForPossibleCause(cause, tsm).forEach(::add)
++        }
++
++        if (causes.any { it.wiringLike }) {
++            val upper = tsm.taskContent.uppercase(Locale.US)
++            Regex("\\b(?:REF\\.\\s*)?ASM\\s+(\\d{2}-\\d{2}(?:[-/]\\d{2})?)\\b")
++                .findAll(upper).map { it.groupValues[1].replace('/', '-') }.distinct().take(8)
++                .forEach { ref -> asmHit(ref)?.let { add(it.copy(title = "POSSIBLE CAUSE • AIRCRAFT WIRING • ${it.title}")) } }
++            Regex("\\b(?:REF\\.\\s*)?AWM\\s+(\\d{2}-\\d{2}(?:[-/]\\d{2})?)\\b")
++                .findAll(upper).map { it.groupValues[1].replace('/', '-') }.distinct().take(8)
++                .forEach { ref -> awmDiagramHit(ref)?.let { add(it.copy(title = "POSSIBLE CAUSE • AIRCRAFT WIRING • ${it.title}")) } }
++            Regex("\\b(?:REF\\.\\s*)?ESPM\\s+(\\d{2}-\\d{2}(?:[-/]\\d{2})?)\\b")
++                .findAll(upper).map { it.groupValues[1].replace('/', '-') }.distinct().take(6)
++                .forEach { ref -> espmHit(ref)?.let { add(it.copy(title = "POSSIBLE CAUSE • AIRCRAFT WIRING • ${it.title}")) } }
++        }
++        return out.take(48)
++    }
++
++    private fun ipcHitsForPossibleCause(cause: PossibleCause, tsm: LineTsmResolution): List<SearchHit> {
++        val out = mutableListOf<SearchHit>()
++        val seen = linkedSetOf<String>()
++        fun add(fin: String, pn: String, nomenclature: String, rawBlock: String, exact: Boolean) {
++            if (pn.isBlank()) return
++            val key = "${normalizeToken(fin)}|${normalizeToken(pn)}"
++            if (!seen.add(key)) return
++            val matchType = if (exact) "EXACT FIN/PN" else "ATA + NOMENCLATURE"
++            val ref = fin.ifBlank { pn }
++            out += SearchHit(
++                "part_number", pn, "IPC", ref,
++                "POSSIBLE CAUSE ${cause.index} • ${cause.text} → ${nomenclature.ifBlank { pn }}",
++                "$matchType MATCH FROM VERIFIED TSM POSSIBLE CAUSE\\n${rawBlock.take(1500)}",
++                if (exact) -4450.0 else -3950.0
++            )
++        }
++
++        cause.identifiers.distinct().take(8).forEach { id ->
++            runCatching {
++                db.rawQuery(
++                    "SELECT COALESCE(fin,''),part_number,COALESCE(nomenclature,''),COALESCE(raw_block,'') " +
++                        "FROM ipc_items WHERE UPPER(COALESCE(fin,''))=? OR UPPER(part_number)=? " +
++                        "ORDER BY pdf_page LIMIT 8",
++                    arrayOf(normalizeToken(id), normalizeToken(id))
++                ).use { c ->
++                    while (c.moveToNext()) add(c.getString(0), c.getString(1), c.getString(2), c.getString(3), true)
++                }
++            }
++        }
++        if (out.isNotEmpty()) return out.take(6)
++
++        val terms = possibleCauseTerms(cause.text)
++        if (terms.isEmpty()) return emptyList()
++        val chapter = tsm.taskRef.take(2).filter(Char::isDigit)
++        if (chapter.length != 2) return emptyList()
++        val queryTerms = terms.take(5)
++        val where = queryTerms.joinToString(" OR ") { "UPPER(COALESCE(nomenclature,'')) LIKE ?" }
++        val args = queryTerms.map { "%$it%" }.toMutableList().apply { add("$chapter-%") }.toTypedArray()
++        val candidates = mutableListOf<Array<String>>()
++        runCatching {
++            db.rawQuery(
++                "SELECT COALESCE(fin,''),part_number,COALESCE(nomenclature,''),COALESCE(raw_block,'') " +
++                    "FROM ipc_items WHERE ($where) AND COALESCE(catalog_ref,'') LIKE ? ORDER BY pdf_page LIMIT 120",
++                args
++            ).use { c ->
++                while (c.moveToNext()) candidates += arrayOf(c.getString(0), c.getString(1), c.getString(2), c.getString(3))
++            }
++        }
++        data class Ranked(val row: Array<String>, val overlap: Int, val coverage: Double)
++        val wanted = terms.toSet()
++        if (wanted.size < 2) return emptyList()
++        val minimumOverlap = when (wanted.size) {
++            2 -> 2
++            3 -> 3
++            else -> maxOf(2, (wanted.size * 2 + 2) / 3)
++        }
++        val ranked = candidates.map { row ->
++            val have = possibleCauseTerms(row[2]).toSet()
++            val overlap = wanted.intersect(have).size
++            val coverage = overlap.toDouble() / wanted.size.toDouble()
++            Ranked(row, overlap, coverage)
++        }.filter { it.overlap >= minimumOverlap && it.coverage >= 0.66 }
++            .sortedWith(compareByDescending<Ranked> { it.coverage }.thenByDescending { it.overlap })
++
++        ranked.take(4).forEach { r -> add(r.row[0], r.row[1], r.row[2], r.row[3], false) }
++        return out
++    }
++
++    private fun possibleCauseTerms(text: String): List<String> {
++        val stop = setOf(
++            "THE", "AND", "OR", "OF", "TO", "FROM", "WITH", "WITHOUT", "A", "AN", "AIRCRAFT",
++            "SYSTEM", "ASSY", "ASSEMBLY", "LH", "RH", "LEFT", "RIGHT", "UNIT", "FAULT", "FAILED", "FAILURE"
++        )
++        val base = normalizeText(text).replace(Regex("\\([^)]*\\)"), " ")
++        return Regex("[A-Z][A-Z0-9]{2,}").findAll(base).map { it.value }
++            .map { when (it) { "CONTROLLER" -> "CONTROL"; else -> it } }
++            .filter { it !in stop && !it.matches(Regex("\\d+")) }
++            .distinct().toList()
++    }
++
+     private fun supportHits(tsm: LineTsmResolution, input: FaultInput): List<SearchHit> {
+         val out = mutableListOf<SearchHit>()
+         val seen = linkedSetOf<String>()
+@@ -1469,6 +1666,22 @@ class LineAssistantEngine(
+             }
+         }
+ 
++        if (tsm != null) {
++            val causes = extractPossibleCauses(tsm)
++            append("\nTSM POSSIBLE CAUSES — ALL")
++            if (causes.isEmpty()) {
++                append("\nNo suspect item is listed under the TSM Possible Causes section for this task.\n")
++            } else {
++                append(" (").append(causes.size).append(")\n")
++                causes.forEach { cause ->
++                    append(cause.index).append(") ").append(cause.text)
++                    if (cause.identifiers.isNotEmpty()) append(" • ID: ").append(cause.identifiers.joinToString(", "))
++                    append(if (cause.wiringLike) " • Source route: AWM/ASM/ESPM" else " • Source route: IPC (FIN/PN first, then ATA+nomenclature)")
++                    append('\n')
++                }
++            }
++        }
++
+         append("\n3 • EFFECTIVITY\n")
+         append(if (profile.isBlank()) "NOT VERIFIED — enter REG/MSN/aircraft variant before applying maintenance or dispatch action." else "Aircraft profile: $profile — verify each original source applicability before use.")
+         append("\n\nSOURCE MANUALS REMAIN AUTHORITATIVE.")
+@@ -1501,11 +1714,15 @@ class LineAssistantEngine(
+             append("Fault: ${tsm.maintenanceAta} ${tsm.maintenanceMessage}\n")
+             append("Source: ${tsm.source} Class: ${tsm.faultClass} Identifiers: ${tsm.identifiers.joinToString(", ")}\n")
+             append("Ref TASK: ${tsm.indexTaskRef} -> Active verified ${tsm.taskRef}\n\n")
+-            append("[E4 SELECTED TROUBLESHOOTING BRANCH]\n")
++            append("[E4 TSM POSSIBLE CAUSES — COMPLETE LIST]\n")
++            val causes = extractPossibleCauses(tsm)
++            if (causes.isEmpty()) append("No listed suspect item under Possible Causes.\n")
++            else causes.forEach { cause -> append(cause.index).append(") ").append(cause.text).append('\n') }
++            append("\n[E5 SELECTED TROUBLESHOOTING BRANCH]\n")
+             append((tsm.branch?.evidence ?: tsm.taskContent).take(18000)).append("\n\n")
+         }
+         hits.filter { it.manual !in setOf("MEL", "TSM") }.take(12).forEachIndexed { i, h ->
+-            append("[E${i + 5} ${h.manual} ${h.reference}]\n")
++            append("[E${i + 6} ${h.manual} ${h.reference}]\n")
+             append(h.title).append('\n').append(h.snippet.take(1200)).append("\n\n")
+         }
+         append("[INPUT]\n").append(input.rawText.take(1600))
