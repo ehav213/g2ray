@@ -95,6 +95,8 @@ index 2757733..74ea645 100644
 +            if (current != null) {
 +                current!!.append(' ').append(line)
 +            } else if (!sawBullet) {
++                // Some TSM revisions omit a visible bullet glyph. Keep short cause-like lines,
++                // but suppress page furniture and section numbering.
 +                if (line.length <= 180) raw += line
 +            }
 +        }
@@ -130,6 +132,8 @@ index 2757733..74ea645 100644
 +            if (!cause.wiringLike) ipcHitsForPossibleCause(cause, tsm).forEach(::add)
 +        }
 +
++        // Wiring is a valid Possible Cause, but IPC is not the correct source. Attach exact
++        // schematic/wiring references already printed inside this verified TSM task.
 +        if (causes.any { it.wiringLike }) {
 +            val upper = tsm.taskContent.uppercase(Locale.US)
 +            Regex("\\b(?:REF\\.\\s*)?ASM\\s+(\\d{2}-\\d{2}(?:[-/]\\d{2})?)\\b")
@@ -162,6 +166,7 @@ index 2757733..74ea645 100644
 +            )
 +        }
 +
++        // First choice: exact identifiers printed by the verified TSM Possible Cause.
 +        cause.identifiers.distinct().take(8).forEach { id ->
 +            runCatching {
 +                db.rawQuery(
@@ -176,6 +181,8 @@ index 2757733..74ea645 100644
 +        }
 +        if (out.isNotEmpty()) return out.take(6)
 +
++        // Second choice: nomenclature fallback constrained to the TSM ATA chapter.
++        // This covers cases where the IPC row omits the FIN (for example some CIDS Directors).
 +        val terms = possibleCauseTerms(cause.text)
 +        if (terms.isEmpty()) return emptyList()
 +        val chapter = tsm.taskRef.take(2).filter(Char::isDigit)
