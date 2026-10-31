@@ -1,0 +1,180 @@
+name: Build Line Assistant 1.4.5-PC7 Symptom Index Batch
+
+on:
+  push:
+    branches: [ lineassistant-145-pc7-symptom-index-batch ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Reconstruct exact PC6 runtime and apply PC7
+        working-directory: a340-app
+        shell: bash
+        run: |
+          python lineassistant_v111_runtime_patch.py
+          python lineassistant_v120_pfr_patch.py
+          python lineassistant_v130_pfr_strict_patch.py
+          python lineassistant_v131_compile_fix.py
+          python lineassistant_v132_version_patch.py
+          python lineassistant_v133_output_cleanup_patch.py
+          python lineassistant_v134_task_range_patch.py
+          python lineassistant_v135_pfr_element_split_patch.py
+          python lineassistant_v135_compile_fix.py
+          python lineassistant_v136_universal_pfr_patch.py
+          python lineassistant_v137_pfr_structured_editor_patch.py
+          python lineassistant_v138_patchfix.py
+          python lineassistant_v138_entrypoint_classification_patch.py
+          python lineassistant_v139_exact_ecam_classification_patch.py
+          python lineassistant_v140_cms_index_match_patch.py
+          python lineassistant_v141_sections_manual_crop_patch.py
+          python lineassistant_v141_compile_fix.py
+          python lineassistant_v142_unified_ios_patch.py
+          python lineassistant_v142_xml_fix.py
+          python lineassistant_v143_crop_confirm_toolbar_patch.py
+          python lineassistant_v144_cockpit_only_pfr_patch.py
+          python lineassistant_v145_cms_candidate_selector_patch.py
+          cd ..
+          git apply --check --directory=a340-app a340-app/lineassistant_145_pc1.patch
+          git apply --directory=a340-app a340-app/lineassistant_145_pc1.patch
+          git apply --check --directory=a340-app a340-app/lineassistant_145_pc2_photo_fix.patch
+          git apply --directory=a340-app a340-app/lineassistant_145_pc2_photo_fix.patch
+          cd a340-app
+          python lineassistant_v145_pc3_cause_routing.py
+          python lineassistant_pc4_write_gradle.py
+          python - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, zlib
+          payload=''.join(Path(f'pc4_engine_payload_{i:02d}.txt').read_text().strip() for i in range(5))
+          data=zlib.decompress(base64.b64decode(payload))
+          expected='a4114243f4a2f25f1a0e1420f5e052cc58a348dfeda2cac763a4ef8a8ac775d6'
+          actual=hashlib.sha256(data).hexdigest()
+          assert actual==expected,(actual,expected)
+          Path('app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt').write_bytes(data)
+          PY
+          python lineassistant_pc4_write_search.py
+          python lineassistant_pc4_write_pdfindex.py
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('lineassistant_v145_pc5_complete_branch_sources.py')
+          s=p.read_text()
+          old1='subprocess.run(["git", "apply", "--check", "-"], cwd=ROOT, input=patch, check=True)'
+          old2='subprocess.run(["git", "apply", "-"], cwd=ROOT, input=patch, check=True)'
+          new1='subprocess.run(["git", "apply", "--check", "--directory=a340-app", "-"], cwd=ROOT.parent, input=patch, check=True)'
+          new2='subprocess.run(["git", "apply", "--directory=a340-app", "-"], cwd=ROOT.parent, input=patch, check=True)'
+          if old1 not in s or old2 not in s:
+              raise SystemExit('PC5 apply-path fix anchors missing')
+          p.write_text(s.replace(old1,new1).replace(old2,new2))
+          PY
+          python lineassistant_v145_pc5_complete_branch_sources.py
+          python lineassistant_v145_pc6_authoritative_index.py
+          cd ..
+          git apply --check --directory=a340-app a340-app/lineassistant_145_pc7.patch
+          git apply --directory=a340-app a340-app/lineassistant_145_pc7.patch
+
+      - name: Verify exact PC7 and frozen OCR core
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          r=Path('a340-app')
+          def h(p): return hashlib.sha256((r/p).read_bytes()).hexdigest()
+          exact={
+            'app/build.gradle.kts':'ad90f41c3dd23fa50b72eff9fd0ad009ec80045131a8a3983ac4f9dd9b0af5af',
+            'app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt':'fd9a4e8aa0dfd1d4d45b48997af5f08c9a96040591ca6487aa9714fdde4ed578',
+            'app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt':'dd24ab667ab83258e4deb966efa1f320d8ea136c66f7460649fe2169fb8361dc',
+            'app/src/main/java/com/a340/technicalassistant/TsmSymptomIndexParser.kt':'c5bd74e15ac6fd703c7e7252d26be395bcc42718a33a198884763cb9fc0dbc3c',
+            'app/src/test/java/com/a340/technicalassistant/TsmSymptomIndexParserTest.kt':'a6a77817941d5baed54d3af28138a4f3b8bd479f47ebfd0d421c5d6614baf614',
+            'app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt':'37ec455724a3a6071602dc187a224b2e673722194cf977785a8aa63ecb28da62',
+            'app/src/main/java/com/a340/technicalassistant/PostFlightAnalyzer.kt':'99a2fff778a1bc3512b2d38f627c5a568a2a627109bd7e3b7e1ff35964223860',
+          }
+          for p,e in exact.items():
+            a=h(p); print(('PASS ' if a==e else 'FAIL ')+p)
+            if a!=e: raise SystemExit(f'{p}: {a} != {e}')
+          a=(r/'app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt').read_text()
+          start=a.index('    private fun ocr(uri: Uri)')
+          end=a.index('    private fun handlePfrOcr',start)
+          ocr=hashlib.sha256(a[start:end].encode()).hexdigest()
+          expected='21ae2c8998884b78b13f3a4b4d04dcd98f4294f94c1fc3d591a76a95b6ebcdd2'
+          print('OCR BODY',ocr)
+          if ocr!=expected: raise SystemExit('OCR core changed')
+          e=(r/'app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt').read_text()
+          act=(r/'app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt').read_text()
+          assert 'authoritativeIndexOnly = true' in e
+          assert 'TsmSymptomIndexParser.parse(content)' in e
+          assert 'PFR: Fault Symptom List is authoritative; never guess a task.' in e
+          assert 'RESOLVE ALL REVIEWED EVENTS' in act
+          assert 'PFR BATCH RESULT' in act
+          print('PASS PC7 authoritative index + batch markers')
+          PY
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android 35 SDK
+        shell: bash
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Run PC7 regression tests
+        working-directory: a340-app
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:testDebugUnitTest --stacktrace
+
+      - name: Build debug APK
+        working-directory: a340-app
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify APK packaging
+        shell: bash
+        run: |
+          unzip -l a340-app/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
+          test -s a340-app/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Prepare artifacts
+        shell: bash
+        run: |
+          cp a340-app/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.4.5-PC7.apk
+          sha256sum LineAssistant-1.4.5-PC7.apk | tee LineAssistant-1.4.5-PC7.sha256
+          rm -rf a340-app/.gradle a340-app/app/build a340-app/build a340-app/.idea
+          rm -f a340-app/local.properties
+
+      - name: Upload source
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.5-PC7-Source
+          path: a340-app/
+          if-no-files-found: error
+          include-hidden-files: true
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.5-PC7
+          path: |
+            LineAssistant-1.4.5-PC7.apk
+            LineAssistant-1.4.5-PC7.sha256
+          if-no-files-found: error
