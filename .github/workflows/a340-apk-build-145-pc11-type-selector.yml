@@ -1,0 +1,142 @@
+name: Build Line Assistant 1.4.5-PC11 Type Selector
+
+on:
+  push:
+    branches: [ lineassistant-145-pc11-type-selector ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout PC11 overlay
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Download exact successful PC10 source artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          curl -fL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/ehav213/g2ray/actions/artifacts/13067501200/zip" \
+            -o pc10-source.zip
+          mkdir runtime
+          unzip -q pc10-source.zip -d runtime
+          test -f runtime/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt
+
+      - name: Overlay PC11 UI selector and apply patch
+        shell: bash
+        run: |
+          cp overlay/a340-app/app/src/main/java/com/a340/technicalassistant/CockpitTypeCatalog.kt runtime/app/src/main/java/com/a340/technicalassistant/
+          cp overlay/a340-app/app/src/main/java/com/a340/technicalassistant/CockpitTypeSelector.kt runtime/app/src/main/java/com/a340/technicalassistant/
+          cp overlay/a340-app/app/src/test/java/com/a340/technicalassistant/CockpitTypeCatalogTest.kt runtime/app/src/test/java/com/a340/technicalassistant/
+          cp overlay/a340-app/lineassistant_v145_pc11_type_selector.py runtime/
+          cd runtime
+          python lineassistant_v145_pc11_type_selector.py
+
+      - name: Verify PC11 UI-only change and freeze PC10 technical core
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          r=Path('runtime')
+          def h(p): return hashlib.sha256((r/p).read_bytes()).hexdigest()
+          exact={
+            'app/build.gradle.kts':'a3a58a74eb91d9d3bab10d146737fd99991cd23aef7bb3be871e6d628f229c4c',
+            'app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt':'903565168f4f653a1846235928cc5eb2654e2450c33aa73852855d33843e9eaa',
+            'app/src/main/java/com/a340/technicalassistant/CockpitTypeCatalog.kt':'06169a79067c4f395a1c89e82778a32e125e21075fe68383d5507338361afa1c',
+            'app/src/main/java/com/a340/technicalassistant/CockpitTypeSelector.kt':'de5f79145c5f441fea9857a9cc78062d56c025b986d3953d7777b85d7404103e',
+            'app/src/test/java/com/a340/technicalassistant/CockpitTypeCatalogTest.kt':'639337f3156f865a36646cd0e78102a64550ec0a72d3a76129582a781d4f6c99',
+            'app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt':'c7da44b6e9fa42cc523f8ab130f086b1b5afbdb69ee9517bebab7f2675234b0e',
+            'app/src/main/java/com/a340/technicalassistant/TsmSymptomIndexParser.kt':'8e7ce477dfc9c26e2485333a93b8663b9272863da5c7d7d5fc941773246a07f5',
+            'app/src/main/java/com/a340/technicalassistant/TsmCockpitStatusIndexParser.kt':'0f75873fe9bccf680fa691bb990fc2ae0be2e7e4b9cf9ac836d86659c2a0590f',
+            'app/src/main/java/com/a340/technicalassistant/TsmCauseReferenceMapper.kt':'ab1b051b07626006110bb862aeb3e697f549b625be7434c11a5e2a6dbb72e791',
+            'app/src/main/java/com/a340/technicalassistant/SearchRepository.kt':'1d70c5b0dcbbf8fe80cbb20c04231396f9473b461d869adee44ba8736ba3b2f7',
+            'app/src/main/java/com/a340/technicalassistant/PdfIndex.kt':'ce78b78406c2cd39c9fbf6fa11396dd2f258ec4db2e0abedd07b53e297e8763e',
+            'app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt':'37ec455724a3a6071602dc187a224b2e673722194cf977785a8aa63ecb28da62',
+            'app/src/main/java/com/a340/technicalassistant/PostFlightAnalyzer.kt':'99a2fff778a1bc3512b2d38f627c5a568a2a627109bd7e3b7e1ff35964223860',
+            'app/src/main/res/layout/activity_line_assistant.xml':'7ae9195f163d8395b62b2fe893dc7b8e9c771d6cf093d32230dc2e62341911db',
+          }
+          for p,e in exact.items():
+            a=h(p); print(('PASS ' if a==e else 'FAIL ')+p)
+            if a!=e: raise SystemExit(f'{p}: {a} != {e}')
+          a=(r/'app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt').read_text()
+          c=(r/'app/src/main/java/com/a340/technicalassistant/CockpitTypeCatalog.kt').read_text()
+          assert 'CockpitTypeSelector.create(this, cockpit, seedType)' in a
+          for t in ['OBSERVATIONS','SD FLAG(S)','SD ADVISORY(IES)','STS-MAINTENANCE','STS-INOP SYSTEM','WARNING LIGHT(S)','ND FLAG(S)','PFD FLAG(S)','EWD FLAG(S)','INDICATOR(S)']:
+              assert f'"{t}"' in c
+          assert '"EWD WARNING(S)"' not in c
+          print('PASS PC11: TYPE dropdown added; PC10 routing/TSM/OCR/database core frozen')
+          PY
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android 35 SDK
+        shell: bash
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Run full PC10 regression suite plus PC11 selector tests
+        working-directory: runtime
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:testDebugUnitTest --stacktrace
+
+      - name: Build debug APK
+        working-directory: runtime
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify APK packaging
+        shell: bash
+        run: |
+          unzip -l runtime/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
+          test -s runtime/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Prepare artifacts
+        shell: bash
+        run: |
+          cp runtime/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.4.5-PC11-TYPE-SELECTOR.apk
+          sha256sum LineAssistant-1.4.5-PC11-TYPE-SELECTOR.apk | tee LineAssistant-1.4.5-PC11-TYPE-SELECTOR.sha256
+          rm -rf runtime/.gradle runtime/app/build runtime/build runtime/.idea
+          rm -f runtime/local.properties
+
+      - name: Upload source
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.5-PC11-TYPE-SELECTOR-Source
+          path: runtime/
+          if-no-files-found: error
+          include-hidden-files: true
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.5-PC11-TYPE-SELECTOR
+          path: |
+            LineAssistant-1.4.5-PC11-TYPE-SELECTOR.apk
+            LineAssistant-1.4.5-PC11-TYPE-SELECTOR.sha256
+          if-no-files-found: error
