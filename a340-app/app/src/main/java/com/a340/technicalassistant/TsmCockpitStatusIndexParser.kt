@@ -21,7 +21,7 @@ object TsmCockpitStatusIndexParser {
         val out = mutableListOf<TsmSymptomRecord>()
         var i = 0
         while (i < lines.size) {
-            if (!lines[i].equals("Warnings/Malfunction", true)) {
+            if (!isWarningMarker(lines[i])) {
                 i++
                 continue
             }
@@ -83,9 +83,11 @@ object TsmCockpitStatusIndexParser {
         )
     }
 
+    private fun isWarningMarker(line: String): Boolean = line.startsWith("Warnings/Malfunction", true)
+
     private fun nextWarning(lines: List<String>, from: Int): Int {
         for (i in from until lines.size) {
-            if (lines[i].equals("Warnings/Malfunction", true)) return i
+            if (isWarningMarker(lines[i])) return i
         }
         return lines.size
     }
