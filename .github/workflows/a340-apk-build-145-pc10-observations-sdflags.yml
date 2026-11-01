@@ -1,0 +1,142 @@
+name: Build Line Assistant 1.4.5-PC10 OBSERVATIONS SD FLAG
+
+on:
+  push:
+    branches: [ lineassistant-145-pc10-observations-sdflags ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout PC10 overlay
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Download exact successful PC9 source artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/13056543053/zip" \
+            -o pc9-source.zip
+          mkdir runtime
+          unzip -q pc9-source.zip -d runtime
+          test -f runtime/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt
+
+      - name: Overlay PC10 sidecar parser and tests
+        shell: bash
+        run: |
+          cp overlay/a340-app/app/src/main/java/com/a340/technicalassistant/TsmCockpitStatusIndexParser.kt \
+             runtime/app/src/main/java/com/a340/technicalassistant/
+          cp overlay/a340-app/app/src/test/java/com/a340/technicalassistant/TsmCockpitStatusIndexParserTest.kt \
+             runtime/app/src/test/java/com/a340/technicalassistant/
+          cp overlay/a340-app/lineassistant_v145_pc10_observations_sdflags.py runtime/
+          cd runtime
+          python lineassistant_v145_pc10_observations_sdflags.py
+
+      - name: Verify PC10 and freeze PC9 technical core
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          r=Path('runtime')
+          def h(p): return hashlib.sha256((r/p).read_bytes()).hexdigest()
+          exact={
+            'app/build.gradle.kts':'91d7654aaf48528974239681274ac0bc3e5a4ffa6f744b9c1308e61c7cb04f02',
+            'app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt':'c7da44b6e9fa42cc523f8ab130f086b1b5afbdb69ee9517bebab7f2675234b0e',
+            'app/src/main/java/com/a340/technicalassistant/TsmCockpitStatusIndexParser.kt':'a637d7e1d643c069c5b7742d65a13e3737b7beec558892845f14dd5337c7d6ae',
+            'app/src/test/java/com/a340/technicalassistant/TsmCockpitStatusIndexParserTest.kt':'a3b5c40b59ad36d1351fa42464d98ff41de2931921d1060f9d637a19f1183b89',
+            'app/src/main/java/com/a340/technicalassistant/TsmSymptomIndexParser.kt':'8e7ce477dfc9c26e2485333a93b8663b9272863da5c7d7d5fc941773246a07f5',
+            'app/src/main/java/com/a340/technicalassistant/TsmCauseReferenceMapper.kt':'ab1b051b07626006110bb862aeb3e697f549b625be7434c11a5e2a6dbb72e791',
+            'app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt':'dd24ab667ab83258e4deb966efa1f320d8ea136c66f7460649fe2169fb8361dc',
+            'app/src/main/java/com/a340/technicalassistant/SearchRepository.kt':'1d70c5b0dcbbf8fe80cbb20c04231396f9473b461d869adee44ba8736ba3b2f7',
+            'app/src/main/java/com/a340/technicalassistant/PdfIndex.kt':'ce78b78406c2cd39c9fbf6fa11396dd2f258ec4db2e0abedd07b53e297e8763e',
+            'app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt':'37ec455724a3a6071602dc187a224b2e673722194cf977785a8aa63ecb28da62',
+            'app/src/main/java/com/a340/technicalassistant/PostFlightAnalyzer.kt':'99a2fff778a1bc3512b2d38f627c5a568a2a627109bd7e3b7e1ff35964223860',
+            'app/src/main/res/layout/activity_line_assistant.xml':'7ae9195f163d8395b62b2fe893dc7b8e9c771d6cf093d32230dc2e62341911db',
+          }
+          for p,e in exact.items():
+            a=h(p); print(('PASS ' if a==e else 'FAIL ')+p)
+            if a!=e: raise SystemExit(f'{p}: {a} != {e}')
+          core=(r/'app/src/main/java/com/a340/technicalassistant/TsmSymptomIndexParser.kt').read_text()
+          engine=(r/'app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt').read_text()
+          helper=(r/'app/src/main/java/com/a340/technicalassistant/TsmCockpitStatusIndexParser.kt').read_text()
+          assert 'TsmCockpitStatusIndexParser.parse(content)' in engine
+          assert 'OBSERVATIONS' in helper and 'SD\\s*FLAG' in helper
+          assert 'object TsmSymptomIndexParser' in core
+          assert 'versionName = "1.4.5-PC10-OBS-SDFLAG"' in (r/'app/build.gradle.kts').read_text()
+          print('PASS PC10 sidecar routing; original TSM parser and PC9 technical core frozen')
+          PY
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android 35 SDK
+        shell: bash
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Run full regression suite including PC10
+        working-directory: runtime
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:testDebugUnitTest --stacktrace
+
+      - name: Build debug APK
+        working-directory: runtime
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify APK packaging
+        shell: bash
+        run: |
+          unzip -l runtime/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
+          test -s runtime/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Prepare artifacts
+        shell: bash
+        run: |
+          cp runtime/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.4.5-PC10-OBS-SDFLAG.apk
+          sha256sum LineAssistant-1.4.5-PC10-OBS-SDFLAG.apk | tee LineAssistant-1.4.5-PC10-OBS-SDFLAG.sha256
+          rm -rf runtime/.gradle runtime/app/build runtime/build runtime/.idea
+          rm -f runtime/local.properties
+
+      - name: Upload source
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.5-PC10-OBS-SDFLAG-Source
+          path: runtime/
+          if-no-files-found: error
+          include-hidden-files: true
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.5-PC10-OBS-SDFLAG
+          path: |
+            LineAssistant-1.4.5-PC10-OBS-SDFLAG.apk
+            LineAssistant-1.4.5-PC10-OBS-SDFLAG.sha256
+          if-no-files-found: error
