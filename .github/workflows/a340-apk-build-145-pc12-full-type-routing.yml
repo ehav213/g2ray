@@ -1,0 +1,142 @@
+name: Build Line Assistant 1.4.5-PC12 Full Type Routing
+
+on:
+  push:
+    branches: [ lineassistant-145-pc12-full-type-routing ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout PC12 overlay
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Download exact successful PC11 source artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          curl -fL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/ehav213/g2ray/actions/artifacts/13095871724/zip" \
+            -o pc11-source.zip
+          mkdir runtime
+          unzip -q pc11-source.zip -d runtime
+          test -f runtime/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt
+
+      - name: Overlay PC12 sidecar parser and tests
+        shell: bash
+        run: |
+          cp overlay/a340-app/app/src/main/java/com/a340/technicalassistant/TsmCockpitStatusIndexParser.kt runtime/app/src/main/java/com/a340/technicalassistant/
+          cp overlay/a340-app/app/src/test/java/com/a340/technicalassistant/TsmCockpitStatusIndexParserTest.kt runtime/app/src/test/java/com/a340/technicalassistant/
+          cp overlay/a340-app/lineassistant_v145_pc12_full_type_routing.py runtime/
+          cd runtime
+          python lineassistant_v145_pc12_full_type_routing.py
+
+      - name: Verify PC12 and freeze PC11 technical core
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          r=Path('runtime')
+          def h(p): return hashlib.sha256((r/p).read_bytes()).hexdigest()
+          exact={
+            'app/build.gradle.kts':'0d554d35c2f69781d2ed3ba7d70be1e435718412784801077e866dbd4ed4e0bc',
+            'app/src/main/java/com/a340/technicalassistant/TsmCockpitStatusIndexParser.kt':'57481c6932db5e421f876c1aaf80ea4a5d5ff58f96538cdf1bbdb087ebe287d5',
+            'app/src/test/java/com/a340/technicalassistant/TsmCockpitStatusIndexParserTest.kt':'ead0bf662737af3aaf4047c0d42532545a40a9251679a3b1090a93314684c72d',
+            'app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt':'c7da44b6e9fa42cc523f8ab130f086b1b5afbdb69ee9517bebab7f2675234b0e',
+            'app/src/main/java/com/a340/technicalassistant/TsmSymptomIndexParser.kt':'8e7ce477dfc9c26e2485333a93b8663b9272863da5c7d7d5fc941773246a07f5',
+            'app/src/main/java/com/a340/technicalassistant/TsmCauseReferenceMapper.kt':'ab1b051b07626006110bb862aeb3e697f549b625be7434c11a5e2a6dbb72e791',
+            'app/src/main/java/com/a340/technicalassistant/SearchRepository.kt':'1d70c5b0dcbbf8fe80cbb20c04231396f9473b461d869adee44ba8736ba3b2f7',
+            'app/src/main/java/com/a340/technicalassistant/PdfIndex.kt':'ce78b78406c2cd39c9fbf6fa11396dd2f258ec4db2e0abedd07b53e297e8763e',
+            'app/src/main/java/com/a340/technicalassistant/PfrGeometryAnalyzerV2.kt':'37ec455724a3a6071602dc187a224b2e673722194cf977785a8aa63ecb28da62',
+            'app/src/main/java/com/a340/technicalassistant/PostFlightAnalyzer.kt':'99a2fff778a1bc3512b2d38f627c5a568a2a627109bd7e3b7e1ff35964223860',
+            'app/src/main/java/com/a340/technicalassistant/LineAssistantActivity.kt':'903565168f4f653a1846235928cc5eb2654e2450c33aa73852855d33843e9eaa',
+            'app/src/main/java/com/a340/technicalassistant/CockpitTypeCatalog.kt':'06169a79067c4f395a1c89e82778a32e125e21075fe68383d5507338361afa1c',
+            'app/src/main/java/com/a340/technicalassistant/CockpitTypeSelector.kt':'de5f79145c5f441fea9857a9cc78062d56c025b986d3953d7777b85d7404103e',
+            'app/src/main/res/layout/activity_line_assistant.xml':'7ae9195f163d8395b62b2fe893dc7b8e9c771d6cf093d32230dc2e62341911db',
+          }
+          for p,e in exact.items():
+            a=h(p); print(('PASS ' if a==e else 'FAIL ')+p)
+            if a!=e: raise SystemExit(f'{p}: {a} != {e}')
+          p=(r/'app/src/main/java/com/a340/technicalassistant/TsmCockpitStatusIndexParser.kt').read_text()
+          supported=p.split('private val anyType',1)[0]
+          for t in ['OBSERVATIONS','SD FLAG(S)','SD ADVISORY(IES)','WARNING LIGHT(S)','ND FLAG(S)','PFD FLAG(S)','EWD FLAG(S)','INDICATOR(S)']:
+              assert f'"{t}"' in supported, t
+          assert '"EWD WARNING(S)"' not in supported
+          g=(r/'app/build.gradle.kts').read_text()
+          assert 'versionCode = 57' in g and 'versionName = "1.4.5-PC12-FULL-TYPE-ROUTING"' in g
+          print('PASS PC12: all 8 sidecar types enabled; core TSM/task/cause/OCR/UI frozen')
+          PY
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android 35 SDK
+        shell: bash
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Run full regression suite including PC12 blank-ATA types
+        working-directory: runtime
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:testDebugUnitTest --stacktrace
+
+      - name: Build debug APK
+        working-directory: runtime
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify APK packaging
+        shell: bash
+        run: |
+          unzip -l runtime/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
+          test -s runtime/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Prepare artifacts
+        shell: bash
+        run: |
+          cp runtime/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.4.5-PC12-FULL-TYPE-ROUTING.apk
+          sha256sum LineAssistant-1.4.5-PC12-FULL-TYPE-ROUTING.apk | tee LineAssistant-1.4.5-PC12-FULL-TYPE-ROUTING.sha256
+          rm -rf runtime/.gradle runtime/app/build runtime/build runtime/.idea
+          rm -f runtime/local.properties
+
+      - name: Upload source
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.5-PC12-FULL-TYPE-ROUTING-Source
+          path: runtime/
+          if-no-files-found: error
+          include-hidden-files: true
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.5-PC12-FULL-TYPE-ROUTING
+          path: |
+            LineAssistant-1.4.5-PC12-FULL-TYPE-ROUTING.apk
+            LineAssistant-1.4.5-PC12-FULL-TYPE-ROUTING.sha256
+          if-no-files-found: error
