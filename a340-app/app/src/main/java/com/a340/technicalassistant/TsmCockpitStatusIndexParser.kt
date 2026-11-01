@@ -26,6 +26,9 @@ object TsmCockpitStatusIndexParser {
         "INDICATOR(S)"
     )
 
+    // Include all known TSM Type labels as row terminators so an unsupported
+    // row (for example EWD WARNING(S)) can never bleed into the following
+    // supported blank-ATA row in the same Warnings/Malfunction block.
     private val anyType = Regex(
         "(?i)(SD\\s+ADVISORY\\(IES\\)|WARNING\\s+LIGHT\\(S\\)|EWD\\s+WARNING\\(S\\)|" +
             "STS-MAINTENANCE|STS-INOP\\s+SYSTEM|OBSERVATIONS|ND\\s+FLAG\\(S\\)|" +
@@ -88,6 +91,9 @@ object TsmCockpitStatusIndexParser {
             cursor = match.range.last + 1
             val type = canonicalType(match.value) ?: continue
 
+            // A row may begin with an ATA Ref, but blank ATA is valid and must
+            // remain blank. Supporting ATA-present rows here is safe because
+            // the engine de-duplicates identical core/sidecar records.
             var cockpitAta = ""
             val ataMatch = Regex("^(\\d{2}-\\d{2})\\s+").find(row)
             if (ataMatch != null && ata2.matches(ataMatch.groupValues[1])) {
