@@ -1,0 +1,133 @@
+name: Build Line Assistant 1.4.5-PC13 FSI Complete
+
+on:
+  push:
+    branches: [ lineassistant-145-pc13-fsi-complete ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout PC13 overlay
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Download exact successful PC12 source artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          curl -fL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/ehav213/g2ray/actions/artifacts/13099195206/zip" \
+            -o pc12-source.zip
+          mkdir runtime
+          unzip -q pc12-source.zip -d runtime
+          test -f runtime/app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt
+          test -f runtime/app/src/main/java/com/a340/technicalassistant/TsmCockpitStatusIndexParser.kt
+
+      - name: Apply strictly limited PC13 patch
+        shell: bash
+        run: |
+          cp overlay/a340-app/lineassistant_v145_pc13_fsi_complete.py runtime/
+          cp overlay/a340-app/PC13_FINAL_AUDIT.txt runtime/
+          cd runtime
+          python lineassistant_v145_pc13_fsi_complete.py
+
+      - name: Verify PC13 scope and accepted FSI contract
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          r=Path('runtime')
+          parser=(r/'app/src/main/java/com/a340/technicalassistant/TsmCockpitStatusIndexParser.kt').read_text()
+          engine=(r/'app/src/main/java/com/a340/technicalassistant/LineAssistantEngine.kt').read_text()
+          gradle=(r/'app/build.gradle.kts').read_text()
+          types=['OBSERVATIONS','SD FLAG(S)','SD ADVISORY(IES)','WARNING LIGHT(S)','ND FLAG(S)','PFD FLAG(S)','EWD FLAG(S)','INDICATOR(S)','EWD WARNING(S)','STS-MAINTENANCE','STS-INOP SYSTEM']
+          supported=parser.split('private val anyType',1)[0]
+          for t in types:
+              assert f'"{t}"' in supported, t
+          assert '[A-Z0-9]{3}' in parser
+          assert 'Possible associated Warning/Malfunction' in parser
+          assert engine.count('tsmCandidateDedupeKey(') == 4  # helper + 3 FSI call sites
+          assert 'listOf(record.indexTaskRef.trim().uppercase(Locale.US), type.uppercase(Locale.US), normalizeText(message))' in engine
+          assert 'versionCode = 59' in gradle
+          assert 'versionName = "1.4.5-PC13-FSI-COMPLETE"' in gradle
+          audit=(r/'PC13_FINAL_AUDIT.txt').read_text()
+          for line in ['Pages: 3416','Missing: 0','Extra: 0','Malformed: 0','Parser unique FSI candidates: 12,260','RESULT: PASS']:
+              assert line in audit, line
+          print('PASS PC13 scope/contract verification')
+          PY
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android 35 SDK
+        shell: bash
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Run full regression suite including PC13 FSI cases
+        working-directory: runtime
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:testDebugUnitTest --stacktrace
+
+      - name: Build PC13 debug APK
+        working-directory: runtime
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify APK packaging
+        shell: bash
+        run: |
+          unzip -l runtime/app/build/outputs/apk/debug/app-debug.apk | grep -Ei 'lib/arm64-v8a/.*sqlite.*\.so'
+          test -s runtime/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Prepare final artifacts
+        shell: bash
+        run: |
+          cp runtime/app/build/outputs/apk/debug/app-debug.apk LineAssistant-1.4.5-PC13-FSI-COMPLETE.apk
+          sha256sum LineAssistant-1.4.5-PC13-FSI-COMPLETE.apk | tee LineAssistant-1.4.5-PC13-FSI-COMPLETE.sha256
+          cp runtime/PC13_FINAL_AUDIT.txt PC13_FINAL_AUDIT.txt
+          rm -rf runtime/.gradle runtime/app/build runtime/build runtime/.idea
+          rm -f runtime/local.properties
+
+      - name: Upload final PC13 source
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.5-PC13-FSI-COMPLETE-Source
+          path: runtime/
+          if-no-files-found: error
+          include-hidden-files: true
+
+      - name: Upload final PC13 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineAssistant-1.4.5-PC13-FSI-COMPLETE
+          path: |
+            LineAssistant-1.4.5-PC13-FSI-COMPLETE.apk
+            LineAssistant-1.4.5-PC13-FSI-COMPLETE.sha256
+            PC13_FINAL_AUDIT.txt
+          if-no-files-found: error
