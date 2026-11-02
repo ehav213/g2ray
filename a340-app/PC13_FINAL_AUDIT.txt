@@ -1,0 +1,50 @@
+LineAssistant 1.4.5-PC13-FSI-COMPLETE
+PC13 FINAL FAULT SYMPTOM INDEX AUDIT
+
+SCOPE
+- Fault Symptom Index parser only.
+- TSM task content, Possible Causes, Fault Confirmation, Fault Isolation, and troubleshooting procedure logic were not modified.
+- All 11 FSI Type labels are parsed.
+- Possible Associated Warning/Malfunction rows are included.
+- Cockpit/status FSI candidate dedupe key is Task + Type + Message.
+- Standalone CMS-only candidate identity retains its legacy identity so the maintenance-message path is not changed.
+
+SOURCE AUDITED
+- NTSMIRMA_000002.pdf
+- Pages: 3416
+- SHA-256: 32d6099f74a138cb72ab639014a7e70478513c087c4436cdf9e254ca58846f0d
+
+FINAL INDEPENDENT AUDIT
+- Warning/Malfunction blocks: 13,993
+- Parser rows before candidate dedupe: 12,263
+- Expected unique FSI candidates (Task + Type + Message): 12,260
+- Parser unique FSI candidates: 12,260
+- Missing: 0
+- Extra: 0
+- Malformed: 0
+- Possible Associated unique candidates: 2,433
+- Possible Associated missing: 0
+
+UNIQUE CANDIDATES BY TYPE
+- EWD WARNING(S): 4,615
+- STS-INOP SYSTEM: 1,595
+- STS-MAINTENANCE: 1,371
+- OBSERVATIONS: 1,366
+- WARNING LIGHT(S): 1,241
+- SD FLAG(S): 916
+- ND FLAG(S): 382
+- PFD FLAG(S): 270
+- INDICATOR(S): 213
+- SD ADVISORY(IES): 149
+- EWD FLAG(S): 142
+
+PC13 FIXES
+- Added EWD WARNING(S), completing all 11 Types.
+- Retained STS-MAINTENANCE and STS-INOP SYSTEM support.
+- Included Possible Associated Warning/Malfunction Type rows.
+- Accepted Airbus three-character alphanumeric Task identifiers such as A00/A01 in FSI references.
+- Removed extracted table-column prefix "Message " from blank-ATA FSI rows where it is not part of the actual warning/malfunction wording.
+- Prevented page headers/footers/effectivity markers from contaminating continued FSI rows.
+- Candidate dedupe for cockpit/status FSI rows uses Task + Type + Message.
+
+RESULT: PASS
