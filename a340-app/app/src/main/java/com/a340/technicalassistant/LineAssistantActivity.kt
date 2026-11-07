@@ -86,10 +86,19 @@ class LineAssistantActivity : AppCompatActivity() {
         }
     }
     private val galleryPicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) ocr(uri)
+        if (uri != null) openImageEditor(uri)
     }
     private val takePhoto = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
-        if (ok) photoUri?.let(::ocr)
+        if (ok) photoUri?.let(::openImageEditor)
+    }
+    private val imageEditor = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == RESULT_OK) {
+            result.data?.getStringExtra(ImageEditorActivity.EXTRA_RESULT)?.let { ocr(Uri.parse(it)) }
+        }
+    }
+    private fun openImageEditor(uri: Uri) {
+        imageEditor.launch(Intent(this, ImageEditorActivity::class.java)
+            .putExtra(ImageEditorActivity.EXTRA_SOURCE, uri.toString()))
     }
     private val cameraPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) startCamera() else toast("Camera permission is required")
