@@ -75,7 +75,7 @@ class ImageEditorActivity : AppCompatActivity() {
         }
         panel.addView(preview, LinearLayout.LayoutParams(-1, resources.displayMetrics.heightPixels / 3))
         angleLabel = label(panel, "Rotation / straightening: 0°")
-        rotation = slider(panel, 180, 0) { updatePreview() }
+        rotation = slider(panel, 359, 0) { updatePreview() }
         label(panel, "Brightness")
         brightness = slider(panel, 200, 100) { updatePreview() }
         label(panel, "Contrast")
@@ -94,7 +94,7 @@ class ImageEditorActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
         action("Rotate 90°") {
-            rotation.progress = (rotation.progress + 90) % 181
+            rotation.progress = (rotation.progress + 90) % 360
             updatePreview()
         }
         action("Reset") {
